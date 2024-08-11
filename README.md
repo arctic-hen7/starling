@@ -1,0 +1,15 @@
+# 🐦 Starling 🌟
+
+Starling is a text-based knowledge management tool that implements the [Zettelkasten method](), based on a simple principle. The human brain is optimised for making connections between known concepts, and pruning known concepts to minimise storage space. These two goals are in conflict with each other when one learns a concept that only later becomes useful in the context of other concepts. Imagine a typical computer-science degree: you start with an introductory programming course, most of the concepts from which you retain because you're using them constantly. Then you do a data structures and algorithms course a bit later, and you quickly forget everything you know about binary search trees because you don't use them in practice until a later course. Even a gap of a single term makes your brain lose that information, meaning that, when you learn something new, you can't make the connection between it and the older concept that wasn't relevant. Your brain has sabotaged you and decreased your chances of learning, understanding, and retaining the new concept!
+
+This is what a Zettelkasten was made to solve, by storing concepts and especially the links between them in a physical system, so that new concepts can be added and links between concepts seen easily, facilitating deeper understanding and the creation of new concepts. For any academic, this is a dream come true, but for students and those who don't create new knowledge as their primary objective, its traditional purpose can seem less relatable. As such, the Zettelkasten is often turned into a tool for "building a second brain" or something similar --- worthy goals, but ones that require grounding in a personal purpose, which is often missing. Without a personal purpose that a Zettelkasten explicitly helps, the overhead of maintaining one (which is not negligible) becomes too costly, and people abandon these systems.
+
+Starling can't solve that entire problem, but it does aim to make a Zettelkasten more flexible to individual workflows. It's a tool for power users: if you're more comfortable in Word than Vim, you probably won't get as much value from it. But, for those who want complete control over how their knowledge management tools work, Starling provides an *editor-agnostic* solution. It's implemented as a server that watches your files, records links between them, and makes information about these available through endpoints on your local device. This makes building secondary tools (like editor integrations) a breeze. With support for action items as well, Starling is based off Org mode and designed to support many of its features (with full support for both Org and Markdown).
+
+If you're someone who feels the need to switch to Emacs just for Org mode, *this is for you*. If you're someone who wants to maintain a Zettelkasten without relying on a particular editor, *this is for you*.
+
+**Starling is under active development for my personal use, and anything in this repo at the moment should be considered in an extremely alpha state!**
+
+## License
+
+See [`LICENSE`](./LICENSE)
