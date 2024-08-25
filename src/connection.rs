@@ -18,11 +18,26 @@ pub struct Connection {
     pub title: String,
 }
 
+/// A connection *to* a particualr vertex, storing details about where it came from.
+#[derive(Debug, Clone)]
+pub struct BackConnection {
+    /// The identifier of the other vertex that connected to this one.
+    pub uuid: Uuid,
+    /// The type of the connection they used.
+    pub ty: String,
+}
+
 /// The target of a connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionTarget {
     /// A vertex, which has its own connections going out from it.
-    Vertex(String),
+    Vertex(Uuid),
+    /// An invalid vertex; the connection has been made to a UUID, but it doesn't correspond to a
+    /// real vertex.
+    ///
+    /// All connections to UUIDs will start here before becoming [`Self::Vertex`] if they're
+    /// demonstrably valid. Note that self-referencing connections will stay permanently invalid.
+    InvalidVertex(Uuid),
     /// A resource, which is a black-box end-state for connections (e.g. a PDF).
     Resource(String),
     /// The type of the connection has not yet been determined. This will only be used until the
@@ -85,6 +100,7 @@ impl Connection {
                 (link_parts[1], link_parts[0])
             } else {
                 // This is not a valid link type
+                // TODO: URL links trigger this path, what should we do with resources?
                 return None;
             }
         } else {
@@ -92,8 +108,18 @@ impl Connection {
             (link_parts[0], config.default_link_type.as_str())
         };
 
+        // Try to parse the target as a UUID, if we can, then it's an attempt to link to another
+        // vertex
+        let target = if let Ok(uuid) = Uuid::try_parse(target_str) {
+            // We'll start as invalid, and progress to valid if we can
+            ConnectionTarget::InvalidVertex(uuid)
+        } else {
+            // TODO: Resource IDs
+            ConnectionTarget::Unknown(target_str.to_string())
+        };
+
         Some(Self {
-            target: ConnectionTarget::Unknown(target_str.to_string()),
+            target,
             ty: ty.to_string(),
             title: title.to_string(),
         })

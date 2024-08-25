@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+dashmap = "6.0.1"
+futures = "0.3.30"
 orgish = { version = "0.1", path = "../../orgish/orgish/packages/orgish" }
 parking_lot = "0.12.3"
 serde = { version = "1.0.208", features = ["derive"] }
@@ -12,6 +14,7 @@ thiserror = "1"
 tokio = { version = "1", features = [ "macros", "rt", "rt-multi-thread", "fs", "sync" ] }
 toml = "0.8.19"
 uuid = { version = "1.10.0", features = ["v4"] }
+walkdir = "2.5.0"
 
 [dev-dependencies]
 tempfile = "3.12.0"

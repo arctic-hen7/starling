@@ -1,6 +1,6 @@
 use crate::{
     config::STARLING_CONFIG,
-    connection::{ConnectedNode, Connection},
+    connection::{BackConnection, ConnectedNode, Connection, ConnectionTarget},
     error::VertexParseError,
 };
 use orgish::{Document, ForceUuidId, Format, Keyword, Node};
@@ -38,11 +38,13 @@ pub struct Vertex {
     /// The tags this vertex inherits from its parent(s). These would come from the tags in each
     /// parent node, all the way to the tags on the whole file in the root node.
     parent_tags: Vec<String>,
-
     /// All the connections going out from *just this* vertex, not including any from its children.
     connections_out: Vec<Connection>,
     /// All the connections going out from the children of this vertex.
     child_connections_out: Vec<Connection>,
+    /// Connections from other vertices to this one. This doesn't handle anything about child or
+    /// parent vertices, as a given vertex is connected to directly.
+    connections_in: Vec<BackConnection>,
 }
 impl Vertex {
     /// Gets the unique identifier of this vertex.
@@ -52,6 +54,11 @@ impl Vertex {
     /// Gets the canonicalized path of the file in whcih this vertex was found.
     pub fn path(&self) -> &Path {
         self.path.as_path()
+    }
+    /// Sets the path of this vertex to the given [`PathBuf`]. This is a fairly superficial
+    /// operation, and can be done without consequences for linked vertices.
+    pub fn set_path(&mut self, path: PathBuf) {
+        self.path = path;
     }
     /// Gets the full contextualized title of this vertex, including those of all parent vertices
     /// up to the root of the file it was found in.
@@ -77,12 +84,60 @@ impl Vertex {
     pub fn self_tags(&self) -> impl Iterator<Item = &String> {
         self.tags.iter()
     }
-    /// Gets all the connections to other vertices/resources within this vertex and any child
-    /// vertices.
+    /// Gets all the connections to other vertices/resources within this vertex, including those of
+    /// any child vertices.
     pub fn connections_out(&self) -> impl Iterator<Item = &Connection> {
         self.connections_out
             .iter()
             .chain(self.child_connections_out.iter())
+    }
+    /// Gets all the connections to other vertices/resources within this vertex, including those of
+    /// any child vertices, as mutable references.
+    pub fn connections_out_mut(&mut self) -> impl Iterator<Item = &mut Connection> {
+        self.connections_out
+            .iter_mut()
+            .chain(self.child_connections_out.iter_mut())
+    }
+    /// Gets all connections into this particualr vertex, not accounting for any to parent or child
+    /// vertices.
+    pub fn connections_in(&self) -> impl Iterator<Item = &BackConnection> {
+        self.connections_in.iter()
+    }
+    /// Adds the given [`BackConnection`] to this vertex.
+    pub fn add_back_connection(&mut self, connection: BackConnection) {
+        self.connections_in.push(connection);
+    }
+    /// Removes the [`BackConnection`] with the given ID (i.e. from the vertex with the given ID)
+    /// from this vertex. This will change the state of the graph this vertex fits into, and should
+    /// only be called if the vertex with the given ID is being deleted.
+    ///
+    /// If a back-connection to the vertex with the given ID does not exist, this will do nothing.
+    pub fn remove_back_connection(&mut self, connection_id: Uuid) {
+        self.connections_in.retain(|c| c.uuid != connection_id);
+    }
+    /// Invalidates a connection to another vertex. This will change the connection from
+    /// [`ConnectionTarget::Vertex`] to [`ConnectionTarget::InvalidVertex`] for both the
+    /// connections on this vertex itself, and those on its children. Provided this is called
+    /// equally on all children, the nested structure will remain correct.
+    ///
+    /// If a connection to the vertex with the given ID does not exist, this will do nothing.
+    pub fn invalidate_connection(&mut self, connection_id: Uuid) {
+        for connection in self.connections_out.iter_mut() {
+            if matches!(
+                connection.target,
+                ConnectionTarget::Vertex(target_id) if target_id == connection_id
+            ) {
+                connection.target = ConnectionTarget::InvalidVertex(connection_id);
+            }
+        }
+        for connection in self.child_connections_out.iter_mut() {
+            if matches!(
+                connection.target,
+                ConnectionTarget::Vertex(target_id) if target_id == connection_id
+            ) {
+                connection.target = ConnectionTarget::InvalidVertex(connection_id);
+            }
+        }
     }
     /// Returns a list of tuples of vertex IDs and their data, all from the vertex file at the
     /// given path, which is expected to be in the given [`Format`]. This will parse the vertex as
@@ -220,6 +275,7 @@ impl Vertex {
                     .collect(),
                 // This will be extended in our recursion
                 child_connections_out: Vec::new(),
+                connections_in: Vec::new(),
             }];
             // Create vertices for all the children
             for child in node.children() {
