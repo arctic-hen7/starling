@@ -3,6 +3,7 @@ mod connection;
 mod debouncer;
 mod error;
 mod graph;
+mod patch;
 #[cfg(test)]
 mod tests;
 mod vertex;

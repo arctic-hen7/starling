@@ -1,6 +1,12 @@
+// TODO: Can this system handle rename, modify, rename? The second rename would never touch the
+// first...
+
 use std::collections::HashMap;
 use std::convert::identity;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+
+use walkdir::WalkDir;
 
 /// Some kind of filesystem update to a single path.
 #[derive(Clone, PartialEq, Eq)]
@@ -60,9 +66,9 @@ fn debounce_two(x: usize, y: usize, events: &mut Vec<Option<Event>>) {
             (Event::Modify(_), Event::Create(p)) => (None, Some(Event::Modify(p))),
             // Modify-then-delete is just a deletion
             (Event::Modify(_), Event::Delete(p)) => (None, Some(Event::Delete(p))),
-            // Modify-then-rename shuld have the rename hoisted to the front. This will only occur for
-            // a path with no creation event (i.e. one already tracked), which means renames will be
-            // reliably hoisted to the top of the event list.
+            // Modify-then-rename shuld have the rename hoisted to the front. This will only occur
+            // for a path with no creation event (i.e. one already tracked), which means renames
+            // will be reliably hoisted to the top of the event list.
             (Event::Modify(_), Event::Rename(old, new)) => (
                 Some(Event::Rename(old, new.clone())),
                 Some(Event::Modify(new)),
@@ -76,8 +82,8 @@ fn debounce_two(x: usize, y: usize, events: &mut Vec<Option<Event>>) {
             (Event::Rename(old, new), Event::Create(_)) => (None, Some(Event::Rename(old, new))),
             // Rename-then-delete is a deletion of the old path
             (Event::Rename(old, _), Event::Delete(_)) => (None, Some(Event::Delete(old))),
-            // Rename-then-modify is exactly the sequence we want (as for modify-then-rename, this can
-            // only happen for already-tracked paths)
+            // Rename-then-modify is exactly the sequence we want (as for modify-then-rename, this
+            // can only happen for already-tracked paths)
             (Event::Rename(old, new), Event::Modify(new_m)) => {
                 (Some(Event::Rename(old, new)), Some(Event::Modify(new_m)))
             }
@@ -89,78 +95,101 @@ fn debounce_two(x: usize, y: usize, events: &mut Vec<Option<Event>>) {
     events[y] = new_2;
 }
 
-/// A series of debounced updates to the filesystem, organised by event type. Modifications,
-/// creations, and deletions are independent, and may be applied in any order *after* renames, as
-/// all rename events are automatically hoisted (e.g. modify-then-rename -> rename-then-modify).
+/// A series of debounced filesystem events, organised as a map from paths to the events which
+/// have occurred on them. Generally, only the values in this map will be used.
+///
+/// Note that, for renamed paths, the final path will be used as the key in the map.
 pub struct DebouncedEvents {
-    /// Renames of existing files. These must be accounted for **before** any other types of
-    /// events.
-    pub renames: Vec<(PathBuf, PathBuf)>,
-    /// Modifications of existing files.
-    pub modifications: Vec<PathBuf>,
-    /// Deletions of existing files.
-    pub deletions: Vec<PathBuf>,
-    /// Creations of new files.
-    pub creations: Vec<PathBuf>,
+    inner: HashMap<PathBuf, Vec<Event>>,
 }
 impl DebouncedEvents {
-    /// Debounces a series of sequential updates into an organised set of debounced updates.
+    /// Creates a new instance of [`DebouncedEvents`], with no events yet.
+    pub fn new() -> Self {
+        Self {
+            inner: HashMap::new(),
+        }
+    }
+    /// Creates a new instance of [`DebouncedEvents`], with the given events, debounced.
     pub fn from_sequential(events: Vec<Event>) -> Self {
+        let mut debounced = Self::new();
+        debounced.extend_from_sequential(events);
+        debounced
+    }
+    /// Creates a [`DebouncedEvents`] object of creation events from all the readable paths in a
+    /// directory. This will skip paths which cannot be read.
+    pub fn start_from_dir(dir: &Path) -> Self {
+        Self {
+            inner: WalkDir::new(dir)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| {
+                    (
+                        entry.path().to_path_buf(),
+                        vec![Event::Create(entry.path().to_path_buf())],
+                    )
+                })
+                .collect(),
+        }
+    }
+    /// Debounces a series of sequential updates into an organised set of debounced updates,
+    /// extending the existing set of debounced events.
+    ///
+    /// The new events are assumed to have come *after* those previously debounced, and renames
+    /// will be treated as such (i.e. operations on files that have been renamed, using the old
+    /// path, will be considered operations on different files).
+    pub fn extend_from_sequential(&mut self, events: Vec<Event>) {
         // First, collate events for each path, resolving renames automatically as we go
-        let mut events_by_file: HashMap<PathBuf, Vec<Event>> = HashMap::new();
         for event in events {
             // We'll put this event with other events operating on the same file unless it's a
             // rename, in which case we'll move all the events that happened on `from` to a new
             // place for `to` (any subsequent ones on `from` are acting on a different file)
             let operative_path = if let Event::Rename(ref from, ref to) = event {
-                let file_events = events_by_file.remove(from).unwrap_or_default();
-                events_by_file.insert(to.to_path_buf(), file_events);
+                let file_events = self.inner.remove(from).unwrap_or_default();
+                self.inner.insert(to.to_path_buf(), file_events);
                 to.to_path_buf()
             } else {
                 event.path().to_path_buf()
             };
-            events_by_file
+            self.inner
                 .entry(operative_path.to_path_buf())
                 .and_modify(|events| events.push(event.clone()))
                 .or_insert(vec![event]);
         }
 
-        // Now we have a series of totally independent per-file events
-        let mut debounced_global = Self {
-            renames: Vec::new(),
-            modifications: Vec::new(),
-            deletions: Vec::new(),
-            creations: Vec::new(),
-        };
-        for events in events_by_file.into_values() {
+        for events in self.inner.values_mut() {
             // Debounce the events on this file in a window of twos (if there's only one, leave it
             // be). For new paths, this will coalesce all events into a creation, and for existing
             // paths, this will coalesce all events into a possible rename and then a
             // modification/deletion. Either way, renames will be hoisted to the top automatically.
-            let debounced: Vec<Event> = if events.len() >= 2 {
+            if events.len() >= 2 {
+                let events_tmp = std::mem::take(events);
                 // Wrap every event in `Some(_)`, we're about to `None`ify a few of them!
-                let mut events = events.into_iter().map(|e| Some(e)).collect::<Vec<_>>();
-                for i in 1..events.len() {
+                let mut events_tmp = events_tmp.into_iter().map(|e| Some(e)).collect::<Vec<_>>();
+                for i in 1..events_tmp.len() {
                     // This handles all edge cases automatically
-                    debounce_two(i - 1, i, &mut events);
+                    debounce_two(i - 1, i, &mut events_tmp);
                 }
-                events.into_iter().filter_map(identity).collect()
-            } else {
-                events.into_iter().collect()
-            };
-
-            for event in debounced {
-                match event {
-                    // Renames are automatically hoisted by `debounce_two`, so this will always
-                    // work!
-                    Event::Rename(from, to) => debounced_global.renames.push((from, to)),
-                    Event::Modify(p) => debounced_global.modifications.push(p),
-                    Event::Delete(p) => debounced_global.deletions.push(p),
-                    Event::Create(p) => debounced_global.creations.push(p),
-                }
+                *events = events_tmp.into_iter().filter_map(identity).collect()
             }
         }
+    }
+    /// Consumes this instance of [`DebouncedEvents`], returning all the events on every file.
+    pub fn into_vec(self) -> Vec<Event> {
+        self.inner
+            .into_iter()
+            .flat_map(|(_, events)| events)
+            .collect()
+    }
+}
+impl Deref for DebouncedEvents {
+    type Target = HashMap<PathBuf, Vec<Event>>;
 
-        debounced_global
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+impl DerefMut for DebouncedEvents {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
