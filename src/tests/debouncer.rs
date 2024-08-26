@@ -1,6 +1,5 @@
-use std::path::PathBuf;
-
 use crate::debouncer::*;
+use std::path::PathBuf;
 
 #[test]
 fn should_collapse_create_delete() {

@@ -18,13 +18,11 @@ pub struct Connection {
     pub title: String,
 }
 
-/// A connection *to* a particualr vertex, storing details about where it came from.
+/// A connection *to* a particular vertex, storing details about where it came from.
 #[derive(Debug, Clone)]
 pub struct BackConnection {
     /// The identifier of the other vertex that connected to this one.
     pub uuid: Uuid,
-    /// The type of the connection they used.
-    pub ty: String,
 }
 
 /// The target of a connection.

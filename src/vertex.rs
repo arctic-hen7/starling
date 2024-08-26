@@ -6,7 +6,7 @@ use crate::{
 use orgish::{Document, ForceUuidId, Format, Keyword, Node};
 use serde::Deserialize;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
 };
 use tokio::fs;
@@ -38,6 +38,10 @@ pub struct Vertex {
     /// The tags this vertex inherits from its parent(s). These would come from the tags in each
     /// parent node, all the way to the tags on the whole file in the root node.
     parent_tags: Vec<String>,
+
+    // TODO: Once the resources system is designed, somehow make these indexable so
+    // back-connections can swiftly work out the type of connection pointing to them.
+    //
     /// All the connections going out from *just this* vertex, not including any from its children.
     connections_out: Vec<Connection>,
     /// All the connections going out from the children of this vertex.
@@ -139,6 +143,110 @@ impl Vertex {
             }
         }
     }
+    /// Updates this vertex from the provided new version (which must have the same UUID).
+    /// Superficial properties like the title, tags, etc. will be updated directly, and connections
+    /// (both direct and children) will be updated from the new vertex, with any connections that
+    /// were the same as before kept as they were, any new ones left as whatever they are (i.e.
+    /// probably [`ConnectionTarget::InvalidVertex`]), and any old ones that aren't present in the
+    /// new vertex returned in a shadow vertex (which can be handled with the same link cleanup
+    /// logic as normal vertices), which is guaranteed to have no back-connections.
+    ///
+    /// This is designed for updating a vertex that has been in a graph with a modified one parsed
+    /// from the filesystem, so the inbound connection (i.e. back-connections from other vertices)
+    /// will be *kept the same*, and any from the new vertex will be ignored.
+    pub fn update(&mut self, mut new: Vertex) -> Vertex {
+        debug_assert!(self.id == new.id);
+        debug_assert!(self.path == new.path);
+        // This one is important for the properties of the returned shadow
+        assert!(new.connections_in.is_empty());
+
+        // Update the superficial properties (using `new` as a dumping ground)
+        std::mem::swap(&mut self.title, &mut new.title);
+        std::mem::swap(&mut self.tags, &mut new.tags);
+        std::mem::swap(&mut self.parent_tags, &mut new.parent_tags);
+        let old_connections = std::mem::replace(&mut self.connections_out, new.connections_out);
+        let old_child_connections =
+            std::mem::replace(&mut self.child_connections_out, new.child_connections_out);
+
+        // Get the old vertex (valid or invalid) connections (self or children) and put them in
+        // maps by their IDs so we can check which ones are in the new list and which aren't
+        let mut old_vertex_conns = old_connections
+            .into_iter()
+            .filter_map(|conn| match conn.target {
+                ConnectionTarget::Vertex(uuid) | ConnectionTarget::InvalidVertex(uuid) => {
+                    Some((uuid, conn))
+                }
+                // TODO: Should we be totally ignoring resources? Unknowns yes.
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let mut old_child_vertex_conns = old_child_connections
+            .into_iter()
+            .filter_map(|conn| match conn.target {
+                ConnectionTarget::Vertex(uuid) | ConnectionTarget::InvalidVertex(uuid) => {
+                    Some((uuid, conn))
+                }
+                // TODO: Should we be totally ignoring resources? Unknowns yes.
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+
+        // Go through the new connections (child and parent)
+        for (new_conns, old_conns_map) in vec![
+            (self.connections_out.iter_mut(), &mut old_vertex_conns),
+            (
+                self.child_connections_out.iter_mut(),
+                &mut old_child_vertex_conns,
+            ),
+        ] {
+            for conn in new_conns {
+                match conn.target {
+                    // If a new connection to a vertex is invalid, but the same connection was
+                    // valid in the previous version, then the infrastructure is already there, and
+                    // we can validate it in the new version on the spot. Otherwise, invalid
+                    // connections in both should be ignored. The remnants in the map will be
+                    // valid/invalid connections that were removed in the new version.
+                    ConnectionTarget::InvalidVertex(uuid) => {
+                        // See if this vertex was in the old map
+                        if let Some(old_conn) = old_conns_map.remove(&uuid) {
+                            match old_conn.target {
+                                ConnectionTarget::Vertex(uuid) => {
+                                    conn.target = ConnectionTarget::Vertex(uuid)
+                                }
+                                ConnectionTarget::InvalidVertex(_) => {}
+
+                                // See above
+                                // TODO: If above changes, this does too
+                                _ => unreachable!(),
+                            }
+                            conn.target = ConnectionTarget::Vertex(uuid);
+                        }
+                    }
+                    // A new vertex that's just been parsed shouldn't have any pre-validated
+                    // connections
+                    ConnectionTarget::Vertex(_) => {
+                        debug_assert!(false, "found pre-validated connection in vertex update")
+                    }
+
+                    // TODO:
+                    ConnectionTarget::Resource(_) => {}
+                    ConnectionTarget::Unknown(_) => {}
+                }
+            }
+        }
+
+        // We're still using `new` as a dumping ground, put the remaining old connections into it;
+        // these are the valid/invalid connections which were removed in the new version. By
+        // returning a vertex that contains only these, we can use the same logic we use in
+        // `graph.rs` for deleting a vertex (specifically handling its dangling connections) to
+        // prune old back-connections *and* delete old invalid connections from the global map that
+        // tracks those.
+        new.connections_out = old_vertex_conns.into_values().collect();
+        new.child_connections_out = old_child_vertex_conns.into_values().collect();
+
+        new
+    }
+
     /// Returns a list of tuples of vertex IDs and their data, all from the vertex file at the
     /// given path, which is expected to be in the given [`Format`]. This will parse the vertex as
     /// a document and extract information like the title and any tags, from every single node in

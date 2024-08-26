@@ -217,62 +217,140 @@ impl Graph {
 
         // Go through all those vertices and remove them, handling their links
         for vertex in condemned_vertices {
-            // Process all the connections this vertex has to other entries in the graph and handle
-            // them
-            for connection in vertex.connections_out() {
-                match connection.target {
-                    ConnectionTarget::Vertex(target_id) => {
-                        // All vertex IDs still exist, except those which were just deleted, so we
-                        // can safely ignore them (we only care about extant connections to the
-                        // remaining vertices in the graph)
-                        if let Some(target) = self.vertices.get_mut(&target_id) {
-                            target.remove_back_connection(vertex.id());
-                        }
-                    }
-                    // Invalid connections (apart from self-references) will be in the global map
-                    // of invalid links, so remove our ID from there
-                    ConnectionTarget::InvalidVertex(target_id) => {
-                        // We have to remove the invalid link reference from the global map
-                        if target_id == vertex.id() {
-                            continue;
-                        }
-
-                        // Invalid links are guaranteed to be in the global map while there's still
-                        // some connection to them
-                        let refers = self.invalid_vertex_links.get_mut(&target_id).unwrap();
-                        refers.remove(&vertex.id());
-                        // If there are no more references to this invalid link, remove the entire
-                        // entry
-                        if refers.is_empty() {
-                            self.invalid_vertex_links.remove(&target_id);
-                        }
-                    }
-
-                    // TODO:
-                    ConnectionTarget::Resource(_) => todo!(),
-                    ConnectionTarget::Unknown(_) => todo!(),
-                }
-            }
-
-            // Now do the reverse: from the back-connections *on* this vertex, identify all the
-            // ones that connect *to* it and invalidate those connections on them. This works fine
-            // with nested child vertices because we'll just invalidate the connection on all of
-            // them, keeping the structure correct in effect "accidentally".
-            for connector_id in vertex.connections_in().map(|c| c.uuid) {
-                // Again, easily possible that the vertex connecting to this one is also in this
-                // deletion batch, in which case ignore it
-                if let Some(connector) = self.vertices.get_mut(&connector_id) {
-                    connector.invalidate_connection(vertex.id());
-                }
-            }
+            self.delete_vertex_links(vertex);
         }
     }
     /// Handles the modification of an existing path in the graph's domain. The vertex will be
     /// re-parsed, and any changes to the connections therein will be validated.
-    fn handle_modifications(&self, modifications: Vec<PathPatch>) {
-        // TODO:
+    fn handle_modifications(&mut self, modifications: Vec<PathPatch>) {
+        let mut ids_to_check = Vec::new();
+        for modification in modifications {
+            match modification {
+                PathPatch::VertexOk { path, vertices } => {
+                    assert!(
+                        self.paths.contains_key(&path),
+                        "tried to modify path not in graph"
+                    );
+
+                    // Put the new vertices into a map by their IDs and a set of their IDs for
+                    // efficient comparisons
+                    let new_ids = vertices.iter().map(|v| v.id()).collect::<HashSet<_>>();
+                    let mut vertices = vertices
+                        .into_iter()
+                        .map(|v| (v.id(), v))
+                        .collect::<HashMap<_, _>>();
+
+                    // And put the existing IDs in a set too
+                    let path_data = self.paths.get_mut(&path).unwrap();
+                    let existing_ids = path_data.ids.iter().cloned().collect::<HashSet<_>>();
+
+                    // Add any that are in the new list but not the old (we'll validate and
+                    // back-connect them en-masse later)
+                    for new_id in new_ids.difference(&existing_ids) {
+                        self.vertices
+                            .insert(*new_id, vertices.remove(new_id).unwrap());
+                        ids_to_check.push(*new_id);
+                    }
+                    // Compare connections and update superficial properties for vertices that are
+                    // in both lists (and so might have been updated)
+                    for possibly_modified_id in new_ids.intersection(&existing_ids) {
+                        let vertex = self.vertices.get_mut(possibly_modified_id).unwrap();
+                        // Updating gives a "shadow vertex" with only the connections that were
+                        // removed --- we can use regular vertex link deletion logic on it to prune
+                        // both deleted valid connections (i.e. stale back-connections) and deleted
+                        // invalid connection (i.e. outdated references in
+                        // `self.invalid_vertex_links`). Note that this is guaranteed to have no
+                        // inbound connections, so we don't need to worry about that side of the
+                        // deletion processing.
+                        let shadow_vertex =
+                            vertex.update(vertices.remove(possibly_modified_id).unwrap());
+                        self.delete_vertex_links(shadow_vertex);
+
+                        // Any new connections will need validation
+                        ids_to_check.push(*possibly_modified_id);
+                    }
+                    // Delete any that are in the old list but not the new (do this last so we
+                    // don't disrupt the new vertices' links)
+                    for deleted_id in existing_ids.difference(&new_ids) {
+                        let vertex = self.vertices.remove(deleted_id).unwrap();
+                        self.delete_vertex_links(vertex);
+                    }
+                }
+                PathPatch::VertexErr { path, err } => {
+                    assert!(
+                        self.paths.contains_key(&path),
+                        "tried to modify path not in graph"
+                    );
+                    // Replace any existing errors on this path with the new one, leaving any
+                    // vertices intact as the last good state
+                    let path_data = self.paths.get_mut(&path).unwrap();
+                    path_data.error = Some(err);
+                }
+
+                // TODO:
+                PathPatch::Resource { .. } => {}
+            }
+        }
+
+        // All new and modified vertices are up-to-date in the graph, now check their links and
+        // back-connect
+        for id in ids_to_check {
+            self.check_vertex_and_back_connect(&id);
+        }
     }
 
+    /// Deletes the links of this vertex, restoring the graph to a valid state after it's removal.
+    /// This will *not* attempt to remove this vertex from its path's list of vertices.
+    fn delete_vertex_links(&mut self, vertex: Vertex) {
+        // Process all the connections this vertex has to other entries in the graph and handle
+        // them
+        for connection in vertex.connections_out() {
+            match connection.target {
+                ConnectionTarget::Vertex(target_id) => {
+                    // All vertex IDs still exist, except those which were just deleted, so we
+                    // can safely ignore them (we only care about extant connections to the
+                    // remaining vertices in the graph)
+                    if let Some(target) = self.vertices.get_mut(&target_id) {
+                        target.remove_back_connection(vertex.id());
+                    }
+                }
+                // Invalid connections (apart from self-references) will be in the global map
+                // of invalid links, so remove our ID from there
+                ConnectionTarget::InvalidVertex(target_id) => {
+                    // We have to remove the invalid link reference from the global map
+                    if target_id == vertex.id() {
+                        continue;
+                    }
+
+                    // Invalid links are guaranteed to be in the global map while there's still
+                    // some connection to them
+                    let refers = self.invalid_vertex_links.get_mut(&target_id).unwrap();
+                    refers.remove(&vertex.id());
+                    // If there are no more references to this invalid link, remove the entire
+                    // entry
+                    if refers.is_empty() {
+                        self.invalid_vertex_links.remove(&target_id);
+                    }
+                }
+
+                // TODO:
+                ConnectionTarget::Resource(_) => todo!(),
+                ConnectionTarget::Unknown(_) => todo!(),
+            }
+        }
+
+        // Now do the reverse: from the back-connections *on* this vertex, identify all the
+        // ones that connect *to* it and invalidate those connections on them. This works fine
+        // with nested child vertices because we'll just invalidate the connection on all of
+        // them, keeping the structure correct in effect "accidentally".
+        for connector_id in vertex.connections_in().map(|c| c.uuid) {
+            // Again, easily possible that the vertex connecting to this one is also in this
+            // deletion batch, in which case ignore it
+            if let Some(connector) = self.vertices.get_mut(&connector_id) {
+                connector.invalidate_connection(vertex.id());
+            }
+        }
+    }
     /// Checks the vertex with the given ID (which must exist) and validates all connections from
     /// it to other vertices, constructing back-connections in those target vertices, which refer
     /// back to this vertex. This will ignore any connections which have already been validated
@@ -299,10 +377,7 @@ impl Graph {
                     } else if let Some(target_vertex) = self.vertices.get_mut(&target_id) {
                         // Update the invalid link so it's now valid
                         conn.target = ConnectionTarget::Vertex(target_id);
-                        target_vertex.add_back_connection(BackConnection {
-                            uuid: *id,
-                            ty: conn.ty.clone(),
-                        });
+                        target_vertex.add_back_connection(BackConnection { uuid: *id });
                     } else {
                         // Invalid connections that aren't self-references should be noted
                         // globally. This is conveniently stored in another map, which prevents
