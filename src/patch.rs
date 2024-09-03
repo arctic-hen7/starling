@@ -1,10 +1,8 @@
-use crate::{
-    debouncer::{DebouncedEvents, Event},
-    error::VertexParseError,
-    vertex::Vertex,
+use crate::debouncer::{DebouncedEvents, Event};
+use futures::{
+    future::{join, join_all},
+    Future,
 };
-use futures::future::{join, join_all};
-use orgish::Format;
 use std::path::PathBuf;
 
 /// A patch to a graph which has resolved all I/O-bound operations.
@@ -38,8 +36,16 @@ impl GraphPatch {
             match event {
                 Event::Rename(from, to) => renames.push((from, to)),
                 Event::Delete(path) => deletions.push(path),
-                Event::Create(path) => creations_futs.push(PathPatch::new(path)),
-                Event::Modify(path) => modifications_futs.push(PathPatch::new(path)),
+                Event::Create(path) => {
+                    if let Some(patch_fut) = PathPatch::new(path) {
+                        creations_futs.push(patch_fut);
+                    }
+                }
+                Event::Modify(path) => {
+                    if let Some(patch_fut) = PathPatch::new(path) {
+                        modifications_futs.push(patch_fut);
+                    }
+                }
             }
         }
         let (creations, modifications) =
@@ -57,47 +63,30 @@ impl GraphPatch {
 /// An I/O-resolved patch for a single path. From this, the necessary changes can be made to a
 /// graph. Loading many of these into memory is no different than holding a graph in memory (i.e.
 /// no additional details are held).
-pub enum PathPatch {
-    /// The path corresponds to a series of vertices, and we were able to read it and parse them.
-    VertexOk {
-        path: PathBuf,
-        vertices: Vec<Vertex>,
-    },
-    /// The path corresponds to a series of vertices, but parsing failed, and we have a concrete
-    /// error to associate with the path.
-    VertexErr {
-        path: PathBuf,
-        err: VertexParseError,
-    },
-    /// The path corresponds to a resource.
-    Resource {
-        path: PathBuf,
-        // TODO:
-    },
+pub struct PathPatch {
+    /// The path the patch is for.
+    pub path: PathBuf,
+    /// The result of trying to read the contents of that path as a string (which should be
+    /// possible for Org/Markdown files).
+    pub contents_res: Result<String, std::io::Error>,
 }
 impl PathPatch {
     /// Creates a new [`PathPatch`] from the given path. This is entirely self-contained, and, if
-    /// many patches need to be constructed, they should be done in parallel.
-    pub async fn new(path: PathBuf) -> Self {
+    /// many patches need to be constructed, they should be done in parallel. All this does is read
+    /// files.
+    ///
+    /// This will return [`None`] if the path doesn't need a patch constructed from it (i.e. if it
+    /// isn't one of the types of files we track).
+    pub fn new(path: PathBuf) -> Option<impl Future<Output = PathPatch>> {
         let ext = path.extension().unwrap_or_default();
         if ext == "org" || ext == "md" || ext == "markdown" {
-            // We have something which should be a vertex, try parsing it
-            let parse_res = Vertex::many_from_file(
-                &path,
-                if ext == "org" {
-                    Format::Org
-                } else {
-                    Format::Markdown
-                },
-            )
-            .await;
-            match parse_res {
-                Ok(vertices) => PathPatch::VertexOk { path, vertices },
-                Err(err) => PathPatch::VertexErr { path, err },
-            }
+            Some(async move {
+                // Read the contents
+                let contents_res = tokio::fs::read_to_string(&path).await;
+                PathPatch { path, contents_res }
+            })
         } else {
-            // We have another type of file, which we'll consider a resource
-            PathPatch::Resource { path }
+            None
         }
     }
 }

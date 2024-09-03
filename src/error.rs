@@ -29,7 +29,7 @@ pub enum ConfigParseError {
 
 /// Errors that can occur while parsing a single vertex in isolation.
 #[derive(Error, Debug)]
-pub enum VertexParseError {
+pub enum PathParseError {
     #[error("failed to read vertex at '{path:?}'")]
     ReadFailed {
         path: PathBuf,
@@ -42,12 +42,6 @@ pub enum VertexParseError {
         format: orgish::Format,
         #[source]
         err: orgish::error::ParseError,
-    },
-    #[error("failed to canonicalize path for vertex at '{path:?}'")]
-    CanonicalizeFailed {
-        path: PathBuf,
-        #[source]
-        err: std::io::Error,
     },
     #[error("found markdown vertex at '{path:?}' with non-yaml frontmatter (not yet supported!)")]
     FrontmatterNotYaml { path: PathBuf },
@@ -63,6 +57,8 @@ pub enum VertexParseError {
         "found unknown tag '{tag}' in '{path:?}', all tags must be specified in global config"
     )]
     InvalidTag { path: PathBuf, tag: String },
+    #[error("the unique id '{id}' appears more than once in '{path:?}'")]
+    InternalDuplicateId { path: PathBuf, id: Uuid },
 }
 
 /// Errors that can occur while setting up a graph of vertices. These are the errors that would be

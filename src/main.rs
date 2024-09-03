@@ -4,9 +4,9 @@ mod debouncer;
 mod error;
 mod graph;
 mod patch;
+mod path_node;
 #[cfg(test)]
 mod tests;
-mod vertex;
 
 fn main() {
     println!("Hello, world!");

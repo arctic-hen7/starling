@@ -1,403 +1,473 @@
-use crate::{
-    connection::{BackConnection, ConnectionTarget},
-    debouncer::DebouncedEvents,
-    error::{GraphSetupError, PathError, VertexParseError},
-    patch::{GraphPatch, PathPatch},
-    vertex::Vertex,
-};
+use crate::{debouncer::DebouncedEvents, patch::GraphPatch, path_node::PathNode};
+use futures::future::join;
+use futures::future::join3;
+use futures::future::join_all;
+use futures::future::OptionFuture;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
-/// The data associated with a single path in the domain of a [`Graph`].
-struct PathData {
-    /// The unique identifiers of all vertices that come from this path.
-    ids: Vec<Uuid>,
-    /// An error in parsing this path, if one was encountered.
-    error: Option<VertexParseError>,
+/// An update to be made to the graph.
+pub enum GraphUpdate {
+    /// The provided [`PathNode`] should be created and added to the graph. This does *not* include
+    /// any instructions regarding its constituent nodes.
+    CreatePathNode(PathNode),
+    /// The [`PathNode`] with the provided path should be modified to be the new node.
+    ModifyPathNode { path: PathBuf, new_node: PathNode },
+    /// The [`PathNode`] with the provided path should be deleted from the graph.
+    DeletePathNode(PathBuf),
+    /// The provided node should be added to the graph. This does *not* include a connection
+    /// validation instruction.
+    AddNode { id: Uuid, path: PathBuf },
+    /// The node with the given ID should be removed. This will correspond to a blatant deletion of
+    /// the node from the map of all nodes (i.e. connections will *not* be handled, and separate
+    /// [`GraphUpdate::RemoveBacklink`] instructions will probably be needed).
+    RemoveNode(Uuid),
+    /// We should remove the backlink on the node with the given ID from the node with the given
+    /// ID. This will be because either there is no longer a connection to it, or because the
+    /// source vertex has been removed.
+    RemoveBacklink { on: Uuid, from: Uuid },
+    /// We should remove a record of an invalid connection from the (valid) node with the given ID
+    /// to the given (invalid) ID. If there are no references left to that invalid ID, we should
+    /// drop it entirely (we only keep track of them to speed the process of validating previously
+    /// existing connections to newly valid created nodes).
+    RemoveInvalidConnection { from: Uuid, to: Uuid },
+    /// We should make the connection to the given node, which was previously recorded in the
+    /// global tracker as invalid, as valid. This will involve creating a backlink on every node
+    /// that referenced it, and removing the entry from the global tracker.
+    ///
+    /// Currently, this is generated when a [`GraphUpdate::AddNode`] instruction is encountered.
+    ValidateInvalidConnection { to: Uuid },
+    /// We should check if the connection from the node with the given ID to the node with the
+    /// given ID is valid. If so, we should set it as valid and create an appropriate backlink, and
+    /// if not, we should leave it as invalid and register it in a global map that accounts for
+    /// invalid connections (so they can be easily rendered valid if a node with the ID they point
+    /// to is created).
+    ///
+    /// Note that this is also used for rendering valid connections that were previously marked as
+    /// invalid in the global tracker when a node with the (invalid) ID they pointed to is created
+    /// (in which case we know this will succeed).
+    CheckConnection { from: Uuid, to: Uuid },
+    /// We should set the connection on the node with the given ID which goes to the other node
+    /// with the given ID to be invalid. This is used when the node to which the connection goes is
+    /// being removed. The target connection should be added to the global map of invalid
+    /// connections in case it's re-created.
+    InvalidateConnection { on: Uuid, to: Uuid },
 }
 
-/// A graph of composed of many vertices, each of which represents a single entry in a file with a
-/// UUID.
-///
-/// Any operations changing the overall state of the graph should lock *all* affected entries,
-/// update them all, and then mass-release them to ensure the graph is never in a partially-invalid
-/// state.
-pub struct Graph {
-    /// All the vertices in the graph, indexed by their unique identifiers. At any given point, it
-    /// is guaranteed that references to other vertices by their IDs will be valid, and that any
-    /// vertices which have valid refences to them from other vertices will have valid paths in the
-    /// paths map as well.
-    vertices: HashMap<Uuid, Vertex>,
-    /// A map of paths to the vertices that come from them and any errors associated in parsing
-    /// them. Each vertex will appear exactly once in this map. At any point, it is guaranteed that
-    /// a reference to this path will contain vertex IDs that exist in `self.vertices`.
-    paths: HashMap<PathBuf, PathData>,
+type NodeMap = HashMap<Uuid, PathBuf>;
+type PathMap = HashMap<PathBuf, RwLock<PathNode>>;
+type InvalidConnectionsMap = HashMap<Uuid, HashSet<Uuid>>;
 
-    /// A map of invalid vertex links, indexed by the invalid UUID and containing a list of the IDs
-    /// of the vertices which made this invalid link. It is guaranteed that all values in here will
-    /// be valid vertex IDs, and that all invalid vertex links will be present in here.
-    invalid_vertex_links: HashMap<Uuid, HashSet<Uuid>>,
+/// A graph of many nodes derived from Org/Markdown files ([`PathNode`]s), which are connected
+/// together.
+pub struct Graph {
+    /// A map of all the nodes in the graph to the paths containing them (which are guaranteed to
+    /// exist and contain them).
+    nodes: RwLock<NodeMap>,
+    /// All the paths in the graph, indexed by their (relative) paths. On a rename, an entry will
+    /// be removed and recreated here. All the node IDs on a path are guaranteed to exist in the
+    /// nodes map and point back to this path.
+    paths: RwLock<PathMap>,
+    /// A list of invalid connections, indexed by the invalid ID they connected to, and listing in
+    /// each entry the set of nodes which made such a connection, by their IDs.
+    invalid_connections: RwLock<InvalidConnectionsMap>,
 }
 impl Graph {
-    /// Creates a new graph, reading vertices and resources from the given directory.
-    pub async fn new(domain: &Path) -> Result<Self, GraphSetupError> {
-        if !domain.is_dir() {
-            return Err(GraphSetupError::DomainNotDir {
-                path: domain.to_path_buf(),
-            });
-        }
+    /// Creates a new graph, tracking all files in the given directory recursively. This will read
+    /// every file that can be parsed and parse them all.
+    ///
+    /// # Panics
+    ///
+    /// This will panic if the provided path is not a valid directory.
+    pub async fn from_dir(dir: PathBuf) -> Self {
+        assert!(dir.is_dir());
 
-        let mut this = Self {
-            vertices: HashMap::new(),
-            paths: HashMap::new(),
-            invalid_vertex_links: HashMap::new(),
+        // Fake creation events recursively for everything in the directory
+        let creations = DebouncedEvents::start_from_dir(&dir);
+        let patch = GraphPatch::from_events(creations).await;
+
+        let this = Self {
+            nodes: RwLock::new(HashMap::new()),
+            paths: RwLock::new(HashMap::new()),
+            invalid_connections: RwLock::new(HashMap::new()),
         };
+        this.process_fs_patch(patch).await;
 
-        // Create a series of "debounced" exclusively creation events from this directory and then
-        // process that into a series of creation patches
-        let creation_events = DebouncedEvents::start_from_dir(domain);
-        let patch = GraphPatch::from_events(creation_events).await;
-        this.handle_patch(patch);
-
-        Ok(this)
+        this
     }
-    /// Gets all the errors associated with the given path and the vertices in it. This can be used
-    /// to display diagnostics to a user, rather than reporting errors when they occur and crashing
-    /// everything.
+    /// Process a batch of updates from the filesystem. This operates as the start of a pipeline,
+    /// generating modifications which in turn generate instructions for locking and graph updates.
+    /// This will acquire read locks on the paths map and some individual paths as necessary to
+    /// generate updates, but it will not write anything directly (though it will call both
+    /// [`Self::process_renames`] and [`Self::process_updates`]).
+    async fn process_fs_patch(&self, patch: GraphPatch) {
+        // Start with renames (they have to be fully executed before anything else so the right
+        // paths are in the map for everything else)
+        // TODO: If we can make renames happen at the *end* rather than the start, these could be
+        // processed like everything else...
+        self.process_renames(patch.renames);
+
+        // Creations, deletions, and modifications need read guards, and so can all be done
+        // simultaneously without impacting anything else. Creations can be done synchronously, the
+        // others are async.
+        let mut updates = Vec::new();
+        for path_patch in patch.creations {
+            let (path_node, mut updates_l) =
+                PathNode::new(path_patch.path, path_patch.contents_res);
+            updates_l.push(GraphUpdate::CreatePathNode(path_node));
+            updates.push(updates_l);
+        }
+
+        let paths = self.paths.read().await;
+        let mut deletion_futs = Vec::new();
+        for path in patch.deletions {
+            if let Some(path_node) = paths.get(&path) {
+                deletion_futs.push(async {
+                    let path_node = path_node.read().await;
+                    path_node.delete()
+                });
+            }
+        }
+        let mut modification_futs = Vec::new();
+        for path_patch in patch.modifications {
+            if let Some(path_node) = paths.get(&path_patch.path) {
+                modification_futs.push(async {
+                    let path_node = path_node.read().await;
+                    let (new_path_node, mut updates_l) =
+                        path_node.update(path_patch.path.clone(), path_patch.contents_res);
+                    updates_l.push(GraphUpdate::ModifyPathNode {
+                        // We use the old path in case the new one has changed
+                        path: path_patch.path,
+                        new_node: new_path_node,
+                    });
+
+                    updates_l
+                });
+            }
+        }
+
+        // These are both `Vec<Vec<GraphUpdate>>`
+        let (deletion_updates, modification_updates) =
+            join(join_all(deletion_futs), join_all(modification_futs)).await;
+        updates.extend(deletion_updates);
+        updates.extend(modification_updates);
+
+        self.process_updates(updates.into_iter().map(|v| v.into_iter()).flatten())
+            .await;
+    }
+    /// Fully processes the given array of renames (where each tuple is a `from` and then `to`
+    /// path). This will update the paths map and all the nodes in the renamed paths.
+    async fn process_renames(&self, renames: Vec<(PathBuf, PathBuf)>) {
+        // Short-circuit if there are no renames to avoid unnecessary locking
+        if renames.is_empty() {
+            return;
+        }
+
+        let mut paths = self.paths.write().await;
+        let mut nodes = self.nodes.write().await;
+        for (from, to) in renames {
+            // If we can't find the original path, we'll leave this
+            if let Some(path_node) = paths.remove(&from) {
+                // We hold the only reference, reading is guaranteed
+                let path_node_ref = path_node.try_read().unwrap();
+                for node_id in path_node_ref.ids() {
+                    let node_path = nodes.get_mut(node_id).unwrap();
+                    *node_path = path_node_ref.path();
+                }
+                drop(path_node_ref);
+
+                paths.insert(to, path_node);
+            } else {
+                debug_assert!(
+                    false,
+                    "found rename instruction for path that wasn't in the graph"
+                );
+            }
+        }
+    }
+    /// Processes a series of [`GraphUpdate`]s and modifies the graph accordingly. This method is
+    /// where all locking occurs.
     ///
-    /// This will return [`None`] if the given path is not in the graph.
-    pub async fn errors_for_path(&self, path: &Path) -> Option<Vec<PathError>> {
-        let path = self.paths.get(path)?;
-        let mut errors = Vec::new();
-        if let Some(err) = &path.error {
-            errors.push(PathError::ParseError(err.to_string()));
-        }
+    /// *Hint: if there's a deadlock, it's happening in here!*
+    async fn process_updates(&self, updates: impl Iterator<Item = GraphUpdate>) {
+        // Write locks over the maps will go here
+        let mut nodes_fut = None;
+        let mut paths_fut = None;
+        let mut invalid_connections_fut = None;
+        // These are the IDs of nodes whose paths we'll need to lock (but not all of them will be
+        // entered into the nodes map until after stage 1). If any of them don't exist, they'll be
+        // from `GraphUpdate::CheckConnection`, so it's fine if they aren't available.
+        //
+        // We use a `HashSet` to avoid unnecessary doubling-up (which would lead to deadlocks).
+        let mut nodes_to_lock = HashSet::new();
 
-        // The root vertex inherits all connections from its children, so we only need to examine
-        // that (prevents duplicates). There is always a root vertex for each path, and the
-        // information each path holds on vertex IDs is guaranteed up-to-date, so this will work.
-        let root_vertex = self.vertices.get(&path.ids[0]).unwrap();
-        for conn in root_vertex.connections_out() {
-            if let ConnectionTarget::InvalidVertex(target_id) = &conn.target {
-                errors.push(PathError::InvalidConnection(*target_id))
-            }
-        }
+        // This is used in multiple places, so we need one `async` block
+        let mut ic_predefined_fut = Some(async { self.invalid_connections.write().await });
 
-        Some(errors)
-    }
+        // We split updates into those that affect maps only, and those that affect nodes (and
+        // possibly the invalid connections map)
+        let mut map_updates = Vec::new();
+        let mut node_updates = Vec::new();
 
-    /// Handles the given [`GraphPatch`] and applies it to the graph. Conveniently, all I/O-bound
-    /// work is done for us in the construction of a patch, so, once a mutable reference to the
-    /// [`Graph`] can be obtained, this can run synchronously with no locking.
-    pub fn handle_patch(&mut self, patch: GraphPatch) {
-        // Renames are handled atomically, because they don't need any checking or I/O
-        for (from, to) in patch.renames {
-            self.handle_rename(from, to);
-        }
-        // The others are handled together because they involve checking links, which is best done
-        // once you have all information (i.e. all vertex changes)
-        self.handle_creations(patch.creations);
-        self.handle_deletions(patch.deletions);
-        self.handle_modifications(patch.modifications);
-    }
-
-    /// Handles the renaming of a single path in the graph's domain. A rename has no imapct on the
-    /// graph's overall validity, as paths are considered superficial details, so multiple renames
-    /// can be handled in any order without losing performance.
-    ///
-    /// If called with a path that isn't in the graph, this will panic.
-    fn handle_rename(&mut self, from: PathBuf, to: PathBuf) {
-        assert!(
-            self.paths.contains_key(&from),
-            "tried to rename path not in graph"
-        );
-
-        // Remove and re-insert the vertex IDs associated with this path in the paths map
-        let path_data = self.paths.remove(&from).unwrap();
-        for id in path_data.ids.iter() {
-            // We keep the vertices attached to paths updated, so this is guaranteed to exist
-            let vertex = self.vertices.get_mut(id).unwrap();
-            vertex.set_path(to.clone());
-        }
-        // Note that any errors associated with a path carry over if there's been a rename
-        // (which doesn't involve a modification)
-        self.paths.insert(to, path_data);
-    }
-    /// Handles the creation of a series of new paths in the graph's domain. We parse multiple
-    /// creations at once to allow batching checking them all, which ensures we don't pointlessly
-    /// check links more than needed.
-    fn handle_creations(&mut self, creations: Vec<PathPatch>) {
-        // First add everything to the graph, recording all the vertex IDs needing to have their
-        // links checked
-        let mut new_ids = Vec::new();
-        for patch in creations {
-            match patch {
-                PathPatch::VertexOk { path, vertices } => {
-                    assert!(
-                        !self.paths.contains_key(&path),
-                        "tried to create path already in graph"
-                    );
-
-                    let mut ids = Vec::new();
-                    for vertex in vertices {
-                        ids.push(vertex.id());
-                        new_ids.push(vertex.id());
-                        self.vertices.insert(vertex.id(), vertex);
+        for update in updates {
+            match update {
+                // Map updates (stage 1)
+                GraphUpdate::CreatePathNode(_)
+                // We use coarse locks for modification to avoid breaking the hierarchy of stages
+                // (otherwise we'd have to pre-lock a path before we've worked out what other paths
+                // we're going to lock, etc.)
+                | GraphUpdate::ModifyPathNode { .. }
+                | GraphUpdate::DeletePathNode(_) => {
+                    map_updates.push(update);
+                    if paths_fut.is_none() {
+                        paths_fut = Some(async { self.paths.write().await });
                     }
-                    self.paths.insert(
-                        path,
-                        PathData {
-                            ids: ids.clone(),
-                            error: None,
-                        },
-                    );
                 }
-                PathPatch::VertexErr { path, err } => {
-                    assert!(
-                        !self.paths.contains_key(&path),
-                        "tried to create path already in graph"
-                    );
+                GraphUpdate::AddNode { .. } | GraphUpdate::RemoveNode(_) => {
+                    if nodes_fut.is_none() {
+                        nodes_fut = Some(async { self.nodes.write().await });
+                    }
 
-                    self.paths.insert(
-                        path,
-                        PathData {
-                            ids: Vec::new(),
-                            error: Some(err),
-                        },
-                    );
+                    // Adding a new node might make some connections that were previously invalid
+                    // valid, so we could need the invalid connections map as well
+                    if let GraphUpdate::AddNode { id, .. } = update {
+                        if invalid_connections_fut.is_none() {
+                            invalid_connections_fut = Some(ic_predefined_fut.take().unwrap());
+                        }
+                        map_updates.push(GraphUpdate::ValidateInvalidConnection { to: id });
+                    }
+
+                    map_updates.push(update);
+                }
+                GraphUpdate::ValidateInvalidConnection { .. } => {
+                    // This is part of `AddNode`, we shouldn't ever reach it independently
+                    // (currently)
+                    debug_assert!(false, "reached instruction to validate invalid connection independently of adding a node");
+                }
+                GraphUpdate::RemoveInvalidConnection { .. } => {
+                    map_updates.push(update);
+                    if invalid_connections_fut.is_none() {
+                        invalid_connections_fut = Some(ic_predefined_fut.take().unwrap());
+                    }
                 }
 
-                // TODO:
-                PathPatch::Resource { .. } => {}
-            };
-        }
-
-        // Having created some new vertices, there could be invalid vertices in other vertices that
-        // are now valid; these are globally indexed by the invalid UUIDs, and we have a vector of
-        // newly valid ones! At the same time, we can check the new vertices' validity in their own
-        // links.
-        for id in new_ids {
-            self.check_vertex_and_back_connect(&id);
-
-            // See if this new ID is something that has previously been referred to by other
-            // vertices and considered an invalid link
-            if let Some(referrers) = self.invalid_vertex_links.remove(&id) {
-                for referring_id in referrers {
-                    // This will ignore correct vertices, and just analyse incorrect ones, which is
-                    // perfect for our purposes (extra work is minimal)
-                    self.check_vertex_and_back_connect(&referring_id);
+                // Node updates (stage 2)
+                GraphUpdate::InvalidateConnection { on, .. } => {
+                    node_updates.push(update);
+                    nodes_to_lock.insert(on);
                 }
-            }
-        }
-    }
-    /// Handles the deletion of an existing path in the graph's domain. All vertices associated
-    /// with this path will be removed entirely, which will cause invalid link errors on any
-    /// vertices that link to those ones. These will be handled by those invalid connections being
-    /// removed and errors being added on those paths.
-    fn handle_deletions(&mut self, paths: Vec<PathBuf>) {
-        // Remove all the target paths and their vertices, collecting them all for link processing
-        let mut condemned_vertices = Vec::new();
-        for path in paths {
-            // If a path to be deleted doesn't exist, that's not a real problem, so we can ignore
-            // it (but panic in debug builds, because it certainly shouldn't happen)
-            debug_assert!(
-                self.paths.contains_key(&path),
-                "tried to delete path not in graph"
-            );
-            if let Some(path_data) = self.paths.remove(&path) {
-                for vertex_id in path_data.ids {
-                    // These IDs are all guaranteed to exist
-                    condemned_vertices.push(self.vertices.remove(&vertex_id).unwrap());
+                GraphUpdate::RemoveBacklink { on, .. } => {
+                    node_updates.push(update);
+                    nodes_to_lock.insert(on);
+                }
+                GraphUpdate::CheckConnection { from, to } => {
+                    node_updates.push(update);
+                    // We'll need to read the `from` path node and possibly modify the connection
+                    // in it to be valid
+                    nodes_to_lock.insert(from);
+                    // And we might need to add a backlink to `to`, if it exists
+                    nodes_to_lock.insert(to);
+
+                    // We also might need to add an invalid connection
+                    if invalid_connections_fut.is_none() {
+                        invalid_connections_fut = Some(ic_predefined_fut.take().unwrap());
+                    }
                 }
             }
         }
 
-        // Go through all those vertices and remove them, handling their links
-        for vertex in condemned_vertices {
-            self.delete_vertex_links(vertex);
-        }
-    }
-    /// Handles the modification of an existing path in the graph's domain. The vertex will be
-    /// re-parsed, and any changes to the connections therein will be validated.
-    fn handle_modifications(&mut self, modifications: Vec<PathPatch>) {
-        let mut ids_to_check = Vec::new();
-        for modification in modifications {
-            match modification {
-                PathPatch::VertexOk { path, vertices } => {
-                    assert!(
-                        self.paths.contains_key(&path),
-                        "tried to modify path not in graph"
+        // Lock all the maps we need
+        let (mut nodes, mut paths, mut invalid_connections) = join3(
+            OptionFuture::from(nodes_fut),
+            OptionFuture::from(paths_fut),
+            OptionFuture::from(invalid_connections_fut),
+        )
+        .await;
+        // Now we have what we need to run the stage 1 updates (which operate on maps). We'll
+        // insert things with new locks here, which doesn't matter because nothing can get at them
+        // while we hold write locks over the maps. We'll acquire fine-grained locks *before*
+        // releasing the coarse locks for this reason.
+        for update in map_updates {
+            match update {
+                GraphUpdate::CreatePathNode(path_node) => {
+                    debug_assert!(
+                        !paths.as_ref().unwrap().contains_key(&path_node.path()),
+                        "tried to create new path node that was already present in graph"
                     );
 
-                    // Put the new vertices into a map by their IDs and a set of their IDs for
-                    // efficient comparisons
-                    let new_ids = vertices.iter().map(|v| v.id()).collect::<HashSet<_>>();
-                    let mut vertices = vertices
-                        .into_iter()
-                        .map(|v| (v.id(), v))
-                        .collect::<HashMap<_, _>>();
-
-                    // And put the existing IDs in a set too
-                    let path_data = self.paths.get_mut(&path).unwrap();
-                    let existing_ids = path_data.ids.iter().cloned().collect::<HashSet<_>>();
-
-                    // Add any that are in the new list but not the old (we'll validate and
-                    // back-connect them en-masse later)
-                    for new_id in new_ids.difference(&existing_ids) {
-                        self.vertices
-                            .insert(*new_id, vertices.remove(new_id).unwrap());
-                        ids_to_check.push(*new_id);
-                    }
-                    // Compare connections and update superficial properties for vertices that are
-                    // in both lists (and so might have been updated)
-                    for possibly_modified_id in new_ids.intersection(&existing_ids) {
-                        let vertex = self.vertices.get_mut(possibly_modified_id).unwrap();
-                        // Updating gives a "shadow vertex" with only the connections that were
-                        // removed --- we can use regular vertex link deletion logic on it to prune
-                        // both deleted valid connections (i.e. stale back-connections) and deleted
-                        // invalid connection (i.e. outdated references in
-                        // `self.invalid_vertex_links`). Note that this is guaranteed to have no
-                        // inbound connections, so we don't need to worry about that side of the
-                        // deletion processing.
-                        let shadow_vertex =
-                            vertex.update(vertices.remove(possibly_modified_id).unwrap());
-                        self.delete_vertex_links(shadow_vertex);
-
-                        // Any new connections will need validation
-                        ids_to_check.push(*possibly_modified_id);
-                    }
-                    // Delete any that are in the old list but not the new (do this last so we
-                    // don't disrupt the new vertices' links)
-                    for deleted_id in existing_ids.difference(&new_ids) {
-                        let vertex = self.vertices.remove(deleted_id).unwrap();
-                        self.delete_vertex_links(vertex);
-                    }
+                    paths
+                        .as_mut()
+                        .unwrap()
+                        .insert(path_node.path(), RwLock::new(path_node));
                 }
-                PathPatch::VertexErr { path, err } => {
-                    assert!(
-                        self.paths.contains_key(&path),
-                        "tried to modify path not in graph"
+                GraphUpdate::ModifyPathNode { path, new_node } => {
+                    debug_assert!(
+                        paths.as_ref().unwrap().contains_key(&path),
+                        "tried to modify path node that wasn't in the graph"
                     );
-                    // Replace any existing errors on this path with the new one, leaving any
-                    // vertices intact as the last good state
-                    let path_data = self.paths.get_mut(&path).unwrap();
-                    path_data.error = Some(err);
+
+                    let path_node = paths.as_mut().unwrap().get_mut(&path).unwrap();
+                    // Fine to blitz the other lock, there can't be any references to it
+                    *path_node = RwLock::new(new_node);
                 }
+                GraphUpdate::DeletePathNode(path) => {
+                    debug_assert!(
+                        paths.as_ref().unwrap().contains_key(&path),
+                        "tried to remove path node that wasn't in the graph"
+                    );
+                    // This certainly should still exist, but it's no big deal if it doesn't
+                    paths.as_mut().unwrap().remove(&path);
+                }
+                GraphUpdate::AddNode { id, path } => {
+                    debug_assert!(
+                        !nodes.as_ref().unwrap().contains_key(&id),
+                        "tried to add node that was already present in graph"
+                    );
 
-                // TODO:
-                PathPatch::Resource { .. } => {}
-            }
-        }
+                    nodes.as_mut().unwrap().insert(id, path);
+                }
+                GraphUpdate::RemoveNode(node_id) => {
+                    debug_assert!(
+                        nodes.as_ref().unwrap().contains_key(&node_id),
+                        "tried to remove node that wasn't in the graph"
+                    );
 
-        // All new and modified vertices are up-to-date in the graph, now check their links and
-        // back-connect
-        for id in ids_to_check {
-            self.check_vertex_and_back_connect(&id);
-        }
-    }
+                    // This certainly should still exist, but it's no big deal if it doesn't
+                    nodes.as_mut().unwrap().remove(&node_id);
+                }
+                GraphUpdate::ValidateInvalidConnection { to } => {
+                    debug_assert!(
+                        invalid_connections.as_ref().unwrap().contains_key(&to),
+                        "tried to validate invalid connection that wasn't in the map"
+                    );
 
-    /// Deletes the links of this vertex, restoring the graph to a valid state after it's removal.
-    /// This will *not* attempt to remove this vertex from its path's list of vertices.
-    fn delete_vertex_links(&mut self, vertex: Vertex) {
-        // Process all the connections this vertex has to other entries in the graph and handle
-        // them
-        for connection in vertex.connections_out() {
-            match connection.target {
-                ConnectionTarget::Vertex(target_id) => {
-                    // All vertex IDs still exist, except those which were just deleted, so we
-                    // can safely ignore them (we only care about extant connections to the
-                    // remaining vertices in the graph)
-                    if let Some(target) = self.vertices.get_mut(&target_id) {
-                        target.remove_back_connection(vertex.id());
+                    // We'll need to add backlinks to all the nodes that referenced this invalid
+                    // connection
+                    if let Some(referrers) = invalid_connections.as_mut().unwrap().remove(&to) {
+                        // This will almost certainly already be accounted for by other connection
+                        // checking instructions, but it's worth doubling up
+                        nodes_to_lock.insert(to);
+
+                        for referrer in referrers {
+                            node_updates.push(GraphUpdate::CheckConnection { from: referrer, to });
+                            nodes_to_lock.insert(referrer);
+                        }
                     }
                 }
-                // Invalid connections (apart from self-references) will be in the global map
-                // of invalid links, so remove our ID from there
-                ConnectionTarget::InvalidVertex(target_id) => {
-                    // We have to remove the invalid link reference from the global map
-                    if target_id == vertex.id() {
-                        continue;
-                    }
+                GraphUpdate::RemoveInvalidConnection { from, to } => {
+                    if let Some(invalid_referrers) =
+                        invalid_connections.as_mut().unwrap().get_mut(&from)
+                    {
+                        debug_assert!(
+                            invalid_referrers.contains(&to),
+                            "tried to remove invalid connection that wasn't in the map (referrer side)"
+                        );
 
-                    // Invalid links are guaranteed to be in the global map while there's still
-                    // some connection to them
-                    let refers = self.invalid_vertex_links.get_mut(&target_id).unwrap();
-                    refers.remove(&vertex.id());
-                    // If there are no more references to this invalid link, remove the entire
-                    // entry
-                    if refers.is_empty() {
-                        self.invalid_vertex_links.remove(&target_id);
-                    }
-                }
-
-                // TODO:
-                ConnectionTarget::Resource(_) => todo!(),
-                ConnectionTarget::Unknown(_) => todo!(),
-            }
-        }
-
-        // Now do the reverse: from the back-connections *on* this vertex, identify all the
-        // ones that connect *to* it and invalidate those connections on them. This works fine
-        // with nested child vertices because we'll just invalidate the connection on all of
-        // them, keeping the structure correct in effect "accidentally".
-        for connector_id in vertex.connections_in().map(|c| c.uuid) {
-            // Again, easily possible that the vertex connecting to this one is also in this
-            // deletion batch, in which case ignore it
-            if let Some(connector) = self.vertices.get_mut(&connector_id) {
-                connector.invalidate_connection(vertex.id());
-            }
-        }
-    }
-    /// Checks the vertex with the given ID (which must exist) and validates all connections from
-    /// it to other vertices, constructing back-connections in those target vertices, which refer
-    /// back to this vertex. This will ignore any connections which have already been validated
-    /// (even if they might have become invalid!).
-    ///
-    /// This will also record any invalid connections globally.
-    fn check_vertex_and_back_connect(&mut self, id: &Uuid) {
-        // Only in debug because the callers should check this; this is just to catch bugs
-        debug_assert!(
-            self.vertices.contains_key(id),
-            "attempted to check and back-connect a vertex that doesn't exist"
-        );
-
-        // The caller guarantees this to exist; we remove it entirely so we don't have to hold
-        // multiple mutable references (`HashMap`s in Rust use tombstones, so it's cheap to delete
-        // and re-insert provided there are no insertions in between)
-        let mut vertex = self.vertices.remove(id).unwrap();
-        for conn in vertex.connections_out_mut() {
-            match conn.target {
-                ConnectionTarget::InvalidVertex(target_id) => {
-                    if target_id == *id {
-                        // Self-references are simply ignored
-                        continue;
-                    } else if let Some(target_vertex) = self.vertices.get_mut(&target_id) {
-                        // Update the invalid link so it's now valid
-                        conn.target = ConnectionTarget::Vertex(target_id);
-                        target_vertex.add_back_connection(BackConnection { uuid: *id });
+                        invalid_referrers.remove(&to);
                     } else {
-                        // Invalid connections that aren't self-references should be noted
-                        // globally. This is conveniently stored in another map, which prevents
-                        // deadlocks from holding the references we do.
-                        self.invalid_vertex_links
-                            .entry(target_id)
-                            .or_insert(HashSet::new())
-                            .insert(*id);
+                        debug_assert!(
+                            false,
+                            "tried to remove invalid connection that wasn't in the map (referent side)"
+                        );
                     }
                 }
-                // We don't need to do anything for vertices that are already known to be valid
-                ConnectionTarget::Vertex(_) => {}
 
-                // TODO:
-                ConnectionTarget::Resource(_) => todo!(),
-                ConnectionTarget::Unknown(_) => todo!(),
+                _ => unreachable!(),
             }
         }
-        // Reinsert the vertex we removed (no insertions in between, so should be at same position,
-        // minimal overhead)
-        self.vertices.insert(vertex.id(), vertex);
+
+        // We'll need to map from node IDs to paths to figure out which paths to lock, so downgrade
+        // any write guards to read guards or separately acquire such read guards
+        let (nodes_ref, paths_ref) = join(
+            async {
+                if let Some(nodes) = nodes {
+                    // This is fine because it's atomic, a writer can't get to this in the meantime and
+                    // access an invalid map state (i.e. without proper connections)
+                    nodes.downgrade()
+                } else {
+                    self.nodes.read().await
+                }
+            },
+            async {
+                if let Some(paths) = paths {
+                    paths.downgrade()
+                } else {
+                    self.paths.read().await
+                }
+            },
+        )
+        .await;
+
+        // Now we can release the coarse locks and acquire fine-grained locks
+        let path_nodes_futs = nodes_to_lock.into_iter().map(|id| {
+            // We should always be able to find these
+            let path = nodes_ref.get(&id).expect("node ID not found in nodes map");
+            let path_node = paths_ref.get(path).unwrap();
+            async { (path.to_path_buf(), path_node.write().await) }
+        });
+        // This will be used instead of `paths_ref`
+        let mut path_nodes: HashMap<PathBuf, _> =
+            join_all(path_nodes_futs).await.into_iter().collect();
+
+        // We now have everything we need to handle node-level updates
+        for update in node_updates {
+            match update {
+                GraphUpdate::InvalidateConnection { on, to } => {
+                    // If the target was deleted in another instruction, this doesn't matter
+                    // anymore
+                    if let Some(path) = nodes_ref.get(&on) {
+                        let path_node = path_nodes.get_mut(path).unwrap();
+                        path_node.invalidate_connection(on, to);
+                    }
+                }
+                GraphUpdate::RemoveBacklink { on, from } => {
+                    // If the target was deleted in another instruction, this doesn't matter
+                    // anymore
+                    if let Some(path) = nodes_ref.get(&on) {
+                        let path_node = path_nodes.get_mut(path).unwrap();
+                        path_node.remove_backlink(on, from);
+                    }
+                }
+                GraphUpdate::CheckConnection { from, to } => {
+                    // We should never get here, because that would require creating and deleting a
+                    // node in the same instruction set, which *should* be impossible (that would
+                    // just be a modification...)
+                    debug_assert!(
+                        nodes_ref.contains_key(&from),
+                        "tried to check connection from non-existent node"
+                    );
+                    let path_from = nodes_ref.get(&from).unwrap();
+
+                    // Here, if the target doesn't exist, then we should log an invalid connection
+                    // (the existence of this update means we will have a write guard on that map)
+                    if let Some(path_to) = nodes_ref.get(&to) {
+                        // Add the backlink first and get the title
+                        let path_node_to = path_nodes.get_mut(path_to).unwrap();
+                        path_node_to.add_backlink(to, from);
+                        let title = path_node_to.display_title(to).unwrap();
+
+                        // And then validate the connection and update the title of the target
+                        let path_node_from = path_nodes.get_mut(path_from).unwrap();
+                        path_node_from.validate_connection(from, to, title);
+                    } else {
+                        invalid_connections
+                            .as_mut()
+                            .unwrap()
+                            .entry(from)
+                            .or_insert_with(|| HashSet::new())
+                            .insert(from);
+                    }
+                }
+
+                _ => unreachable!(),
+            }
+        }
+
+        // All fine-grained and coarse-grained locks are dropped here, and the map is in a valid
+        // state
     }
 }

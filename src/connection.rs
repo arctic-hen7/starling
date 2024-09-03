@@ -1,58 +1,41 @@
-use crate::{config::STARLING_CONFIG, vertex::VertexNode};
+use crate::{
+    config::STARLING_CONFIG,
+    path_node::{StarlingDocument, StarlingNode},
+};
 use orgish::Format;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// A connection from one vertex to another vertex or resource. Connections are unidirectional, and
-/// characterised by their type, which can be any of the types the user allows in their Starling
-/// config.
+/// A connection from one node to another, by the unique ID of the node being connected to.
+/// Connections can have *types* to encode metadata, and all have a title, which will be updated to
+/// ensure it's valid.
+///
+/// This type doesn't include the actual identifier, because it's designed to be used in a
+/// [`ConnectedString`], which contains an internal map of IDs to these (we avoid double-storing to
+/// minimise space use).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Connection {
-    /// The target of the connection. This will start as [`ConnectionTarget::Unknown`].
-    pub target: ConnectionTarget,
+struct Connection {
     /// The "type" of the connection, which is guaranteed to come from a list the user defined in
     /// their config file (anything else will be an error). This can encode arbitrary metadata.
-    pub ty: String,
+    ///
+    /// When written back to a string, this will be fully-qualified.
+    ty: String,
     /// The title the user used for the link. This may be out of date relative to the title of the
     /// vertex it points to (if it does point to a vertex), and could need updating.
-    pub title: String,
-}
-
-/// A connection *to* a particular vertex, storing details about where it came from.
-#[derive(Debug, Clone)]
-pub struct BackConnection {
-    /// The identifier of the other vertex that connected to this one.
-    pub uuid: Uuid,
-}
-
-/// The target of a connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnectionTarget {
-    /// A vertex, which has its own connections going out from it.
-    Vertex(Uuid),
-    /// An invalid vertex; the connection has been made to a UUID, but it doesn't correspond to a
-    /// real vertex.
     ///
-    /// All connections to UUIDs will start here before becoming [`Self::Vertex`] if they're
-    /// demonstrably valid. Note that self-referencing connections will stay permanently invalid.
-    InvalidVertex(Uuid),
-    /// A resource, which is a black-box end-state for connections (e.g. a PDF).
-    Resource(String),
-    /// The type of the connection has not yet been determined. This will only be used until the
-    /// parsing of the connections in a single vertex has been compared against all other vertices.
-    Unknown(String),
+    /// This will be used for reconstructing the link, whatever it may be.
+    title: String,
 }
-
 impl Connection {
     /// Parses a single connection from a string of the form `[title](type:key)` in Markdown, or
     /// `[[type:key][title]]` in Org mode. In these formats, `type` will be one of the types the
-    /// user has specified in their configuration, and `key` will be some kind of ID, which will be
-    /// resolved as to whether it points to a resource or another vertex once compared with the
-    /// overall vertex map.
+    /// user has specified in their configuration, and `key` will be the unique identifier of
+    /// another node in the graph. This will return both the ID, as well as the metadata properties
+    /// of the title and type.
     ///
     /// This function will return `None` if it is provided either a string which is not a link, or
     /// a link which does not conform to the expected format.
-    pub fn from_str(link: &str, format: Format) -> Option<Self> {
+    fn from_str(link: &str, format: Format) -> Option<(Uuid, Self)> {
         let link = link.trim();
 
         // Regardless of the format, this will get the title and get the parts of the link
@@ -107,62 +90,123 @@ impl Connection {
         };
 
         // Try to parse the target as a UUID, if we can, then it's an attempt to link to another
-        // vertex
-        let target = if let Ok(uuid) = Uuid::try_parse(target_str) {
-            // We'll start as invalid, and progress to valid if we can
-            ConnectionTarget::InvalidVertex(uuid)
-        } else {
-            // TODO: Resource IDs
-            ConnectionTarget::Unknown(target_str.to_string())
-        };
+        // vertex; otherwise, it's not a link as far as we're concerned
+        let id = Uuid::try_parse(target_str).ok()?;
 
-        Some(Self {
-            target,
-            ty: ty.to_string(),
-            title: title.to_string(),
-        })
+        Some((
+            id,
+            Self {
+                ty: ty.to_string(),
+                title: title.to_string(),
+            },
+        ))
+    }
+    /// Converts this connection into a string in the given [`Format`]. This will use whatever the
+    /// registered title is for the connection, and will fully-qualify the link type (e.g. the
+    /// default will not be elided).
+    ///
+    /// As [`Connection`] does not include the ID of the node it points to, the ID must be provided
+    /// separately.
+    fn to_string(&self, id: Uuid, format: Format) -> String {
+        match format {
+            Format::Markdown => {
+                format!("[{}]({}:{})", self.title, self.ty, id)
+            }
+            Format::Org => format!("[[{}:{}][{}]]", self.ty, id, self.title),
+        }
     }
 }
-// impl Connection {
-//     /// Converts this connection back into a string in the given format, adding the saved key
-//     /// prefix. This will return `None` if the target of this connection no longer exists, or if
-//     /// the connection never had an in-memory link established.
-//     pub fn to_string(&self, format: Format) -> Option<String> {
-//         let title = self.target.upgrade()?.read().ok()?.title();
-//
-//         Some(match format {
-//             Format::Markdown => format!(
-//                 "[{}]({}:{}{})",
-//                 title,
-//                 self.ty.to_string(),
-//                 self.key_prefix,
-//                 self.target_id
-//             ),
-//             Format::Org => format!(
-//                 "[[{}][{}:{}{}]]",
-//                 title,
-//                 self.ty.to_string(),
-//                 self.key_prefix,
-//                 self.target_id
-//             ),
-//         })
-//     }
-// }
 
 /// A token in a string that's parsed with connections: each part can be either a string that does
 /// not contain a (valid) link, or a connection.
+#[derive(Clone)]
 enum ConnectionToken {
+    /// A regular string.
     String(String),
-    Connection(Connection),
+    /// A connection, represented by an index into a map of connections and an index (there can be
+    /// many connections to the same other node, all distinguished by their types.)
+    Connection { id: Uuid, idx: usize },
 }
 
-/// A string which contains parsed connections.
-pub struct ConnectedString {
+/// A series of connections to a single node.
+#[derive(Clone)]
+pub struct ParallelConnections {
+    /// Whether or not these connections are valid (they all point to the same place, and validity
+    /// is unimpacted by the metadata of titles and types).
+    valid: bool,
+    /// All the different variants, with their own types and titles.
+    ///
+    /// We store the titles separately in case this connection isn't valid, in which case the
+    /// titles shouldn't be blatantly overriden. If the connection is valid, however, these will
+    /// all be updated to match the target node's title.
+    variants: Vec<Connection>,
+}
+impl ParallelConnections {
+    /// Returns whether or not this set of connections is valid.
+    pub fn valid(&self) -> bool {
+        self.valid
+    }
+}
+
+pub struct ConnectionRef<'a> {
+    id: Uuid,
+    valid: bool,
+    variants: &'a Vec<Connection>,
+}
+impl<'a> ConnectionRef<'a> {
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
+}
+pub struct ConnectionMut<'a> {
+    id: Uuid,
+    valid: &'a mut bool,
+    variants: &'a mut Vec<Connection>,
+}
+impl<'a> ConnectionMut<'a> {
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+    pub fn is_valid(&self) -> bool {
+        *self.valid
+    }
+    pub fn set_valid(&mut self, valid: bool) {
+        *self.valid = valid;
+    }
+}
+pub struct OwnedConnection {
+    id: Uuid,
+    valid: bool,
+    variants: Vec<Connection>,
+}
+impl OwnedConnection {
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
+}
+
+/// A map of the IDs of nodes being connected to to the details of the connections to those nodes.
+/// This characterises all the connections in a string unambiguously.
+type ConnectionMap = HashMap<Uuid, ParallelConnections>;
+
+/// A string which contains parsed connections. Connections are indexed by the IDs of the nodes
+/// they connect to for efficiency of reference, though the map is held separately to allow the
+/// combination of maps for different strings (e.g. the title and body of a node).
+#[derive(Clone)]
+struct ConnectedString {
+    /// A list of raw connection tokens, which can be used to reconstruct the original string.
     inner: Vec<ConnectionToken>,
 }
 impl ConnectedString {
     /// Parses the provided string into one with connections.
-    pub fn from_str(target: &str, format: Format) -> Self {
+    fn from_str(target: &str, format: Format) -> (Self, ConnectionMap) {
+        let mut connections = HashMap::new();
         // Go through the string contents manually to find links (format-specific)
         let mut tokens = Vec::new();
         let mut chars = target.chars().peekable();
@@ -241,8 +285,19 @@ impl ConnectedString {
                         }
 
                         // We have a full connection, parse it
-                        if let Some(conn) = Connection::from_str(&curr_match, format) {
-                            tokens.push(ConnectionToken::Connection(conn));
+                        if let Some((id, conn)) = Connection::from_str(&curr_match, format) {
+                            let variants = &mut connections
+                                .entry(id)
+                                .or_insert(ParallelConnections {
+                                    valid: false,
+                                    variants: Vec::new(),
+                                })
+                                .variants;
+                            variants.push(conn);
+                            tokens.push(ConnectionToken::Connection {
+                                id,
+                                idx: variants.len() - 1,
+                            });
                         } else {
                             // This isn't actually a connection, add it as a string
                             tokens.push(ConnectionToken::String(curr_match));
@@ -266,48 +321,23 @@ impl ConnectedString {
             tokens.push(ConnectionToken::String(curr_match));
         }
 
-        Self { inner: tokens }
+        (Self { inner: tokens }, connections)
     }
-    // /// Converts [`Self`] back into a regular string by stringifying all the connections in it.
-    // /// This will fail with a dangling connection error if a connection with a target that no
-    // /// longer exists is found.
-    // pub fn to_string(&self, format: Format) -> Result<String, DanglingConnectionError> {
-    //     let mut strings = Vec::new();
-    //     for token in &self.inner {
-    //         match token {
-    //             ConnectionToken::String(s) => strings.push(s.clone()),
-    //             ConnectionToken::Connection(conn) => {
-    //                 let string = conn
-    //                     .to_string(format)
-    //                     .ok_or(DanglingConnectionError(conn.target_id().to_string()))?;
-    //                 strings.push(string);
-    //             }
-    //         }
-    //     }
-    //
-    //     Ok(strings.join(""))
-    // }
+    /// Converts [`Self`] back into a regular string by stringifying all the connections in it.
+    /// This takes in a map for reference.
+    fn to_string(&self, connections: &ConnectionMap, format: Format) -> String {
+        let mut string = String::new();
+        for token in &self.inner {
+            match token {
+                // This takes a reference anyway, so no real cost to making this take `&self`
+                ConnectionToken::String(s) => string.push_str(s),
+                ConnectionToken::Connection { id, idx } => {
+                    string.push_str(&connections[id].variants[*idx].to_string(*id, format));
+                }
+            }
+        }
 
-    /// Turns this [`ConnectedString`] into an iterator of the connections in the string.
-    pub fn into_connections(self) -> impl Iterator<Item = Connection> {
-        self.inner.into_iter().filter_map(|token| match token {
-            ConnectionToken::Connection(conn) => Some(conn),
-            ConnectionToken::String(_) => None,
-        })
-    }
-    /// Gets an iterator of all the connections in this string.
-    pub fn connections(&self) -> impl Iterator<Item = &Connection> {
-        self.inner.iter().filter_map(|token| match token {
-            ConnectionToken::Connection(conn) => Some(conn),
-            ConnectionToken::String(_) => None,
-        })
-    }
-    /// Gets an iterator of mutable references to all the connections in this string.
-    pub fn connections_mut(&mut self) -> impl Iterator<Item = &mut Connection> {
-        self.inner.iter_mut().filter_map(|token| match token {
-            ConnectionToken::Connection(conn) => Some(conn),
-            ConnectionToken::String(_) => None,
-        })
+        string
     }
 }
 /// The parser's position while parsing a connection.
@@ -319,140 +349,288 @@ enum ConnectionLoc {
 }
 
 /// The properties of a single connected node within a [`ConnectedNode`] tree.
-struct SingleConnectedNode {
+#[derive(Clone)]
+pub struct SingleConnectedNode {
     /// The tokenised title of the node.
     title: ConnectedString,
     /// The tokenised body of the node, if it exists.
     body: Option<ConnectedString>,
+    /// The map of connections for both the title and body.
+    connections: ConnectionMap,
+    /// A set of the IDs of other nodes which connect to this one. The ID of a node can be used to
+    /// get information about its connections to this one in a series of $O(1)$ lookups.
+    ///
+    /// This will contain an exhaustive list of all the nodes which link to this one, and no
+    /// others.
+    backlinks: HashSet<Uuid>,
+}
+impl SingleConnectedNode {
+    /// Creates a new [`SingleConnectedNode`] from the given strings for a title and body. This
+    /// will start with no backlinks.
+    fn new(title_str: String, body_str: Option<String>, format: Format) -> Self {
+        let (title, mut title_map) = ConnectedString::from_str(&title_str, format);
+        if let Some(body_str) = body_str {
+            let (mut body, body_map) = ConnectedString::from_str(&body_str, format);
+            // We're going to put all entries in the body map into the title map, and where there
+            // are overlaps, the variants in the body will be *appended* to those from the title,
+            // meaning the variant indices among the body tokens should be incremented by however
+            // many variants are currently on that entry in the title map. *Then* we can add the
+            // actual entries.
+            for token in body.inner.iter_mut() {
+                if let ConnectionToken::Connection { id, idx } = token {
+                    let increment = title_map
+                        .get(id)
+                        .map(|conn| conn.variants.len())
+                        .unwrap_or(0);
+                    *idx += increment;
+                }
+            }
+            // Append all the variants of the body map to the title map (there may be overlaps, but
+            // equality comparisons on arbitrary-length strings aren't worth the memory savings
+            // (probably...))
+            for (id, conns) in body_map {
+                title_map
+                    .entry(id)
+                    .or_insert_with(|| ParallelConnections {
+                        valid: conns.valid,
+                        variants: Vec::new(),
+                    })
+                    .variants
+                    .extend(conns.variants);
+            }
+
+            Self {
+                title,
+                body: Some(body),
+                connections: title_map,
+                backlinks: HashSet::new(),
+            }
+        } else {
+            // Simple case, no map combination needed
+            Self {
+                title,
+                body: None,
+                connections: title_map,
+                backlinks: HashSet::new(),
+            }
+        }
+    }
+
+    /// Gets an iterator of all the connections in the title and body of this node.
+    pub fn connections(&self) -> impl Iterator<Item = ConnectionRef<'_>> {
+        self.connections.iter().map(|(id, conn)| ConnectionRef {
+            id: *id,
+            valid: conn.valid,
+            variants: &conn.variants,
+        })
+    }
+    /// Gets an iterator of mutable references to all the connections in the title and body of this
+    /// node.
+    pub fn connections_mut(&mut self) -> impl Iterator<Item = ConnectionMut<'_>> {
+        self.connections.iter_mut().map(|(id, conn)| ConnectionMut {
+            id: *id,
+            valid: &mut conn.valid,
+            variants: &mut conn.variants,
+        })
+    }
+    /// Gets an iterator of the IDs of the nodes which link *to* this node.
+    pub fn backlinks(&self) -> impl Iterator<Item = &Uuid> {
+        self.backlinks.iter()
+    }
+    /// Gets the raw map of connections in the title and body of this node.
+    pub fn connections_map(&self) -> &ConnectionMap {
+        &self.connections
+    }
 }
 
-/// A [`VertexNode`] which contains parsed connections in its title and/or body.
+/// A [`StarlingNode`] which contains parsed connections in its title and/or body.
+#[derive(Clone)]
 pub struct ConnectedNode {
-    /// The original node from which this connected node was created.
-    pub node: VertexNode,
+    /// The original node from which this connected node was created. To save on memory, the title
+    /// and body of this node will be empty strings.
+    ///
+    /// This will have its children inside it as usual.
+    node: StarlingNode,
     /// A map of the UUIDs of nodes in the tree to extracted and tokenised properties.
     map: HashMap<Uuid, SingleConnectedNode>,
 }
 impl ConnectedNode {
     /// Parses the provided node into a connected node by tokenising its title and body (if
     /// present).
-    pub fn from_node(node: VertexNode, format: Format) -> Self {
+    fn from_node(mut node: StarlingNode, format: Format) -> Self {
         // Parse through all the nodes recursively
         fn tokenise_tree(
-            node: &VertexNode,
+            node: &mut StarlingNode,
             format: Format,
             nodes: &mut HashMap<Uuid, SingleConnectedNode>,
         ) {
-            let connected_node = SingleConnectedNode {
-                title: ConnectedString::from_str(&node.title, format),
-                body: node
-                    .body
-                    .as_ref()
-                    .map(|body| ConnectedString::from_str(body, format)),
-            };
+            // Parse the title and body as connected strings, scrubbing them out of the original
+            // `node`
+            let connected_node =
+                SingleConnectedNode::new(std::mem::take(&mut node.title), node.body.take(), format);
             let id = *node.properties.id;
             nodes.insert(id, connected_node);
 
-            for child in node.children() {
+            // Perfectly safe, we aren't modifying the levels of any children
+            for child in node.unchecked_mut_children() {
                 tokenise_tree(child, format, nodes);
             }
         }
         let mut map = HashMap::new();
-        tokenise_tree(&node, format, &mut map);
+        tokenise_tree(&mut node, format, &mut map);
 
         Self { node, map }
     }
-    // /// Converts [`Self`] back into a regular node by stringifying all the connections in it.
-    // ///
-    // /// This will update the internal node with any new connection titles.
-    // pub fn to_node(&self, format: Format) -> Result<VertexNode, DanglingConnectionError> {
-    //     // Recursively go through the tree, replacing the title and body of each node with the
-    //     fn detokenise_tree(
-    //         node: &mut VertexNode,
-    //         format: Format,
-    //         nodes: &HashMap<Uuid, SingleConnectedNode>,
-    //     ) -> Result<(), DanglingConnectionError> {
-    //         let id = *node.properties.id;
-    //         let connected_node = nodes.get(&id).unwrap();
-    //
-    //         node.title = connected_node.title.to_string(format)?;
-    //         if let Some(body) = node.body.as_mut() {
-    //             *body = connected_node.body.as_ref().unwrap().to_string(format)?;
-    //         }
-    //
-    //         // Fine to get the children mutably here, we're not changing their levels
-    //         for child in node.unchecked_mut_children() {
-    //             detokenise_tree(child, format, nodes);
-    //         }
-    //
-    //         Ok(())
-    //     }
-    //     // We clone so we don't have to take `&mut self`, which would make it impossible to save a
-    //     // box depending on this function, because loaders only get `&self`!
-    //     // PERF: Could we have a method to clone without strings?
-    //     let mut node = self.node.clone();
-    //     detokenise_tree(&mut node, format, &self.map)?;
-    //
-    //     Ok(node)
-    // }
+    /// Converts [`Self`] back into a regular node by stringifying all the connections in it.
+    fn to_node(&self, format: Format) -> StarlingNode {
+        // Recursively go through the tree, replacing the title and body of each node with the
+        // serialized versions of their respective connected strings
+        fn detokenise_tree(
+            node: &mut StarlingNode,
+            format: Format,
+            nodes: &HashMap<Uuid, SingleConnectedNode>,
+        ) {
+            let id = *node.properties.id;
+            let connected_node = nodes.get(&id).unwrap();
 
-    /// Returns an iterator of connections in the body and title of the node in this
-    /// [`ConnectedNode`]'s tree with the given UUID. This returns [`None`] if there is nonode with
-    /// the given ID in this tree.
-    pub fn connections_for_uuid(&self, uuid: Uuid) -> Option<impl Iterator<Item = &Connection>> {
-        let node = self.map.get(&uuid)?;
-        Some(
-            node.title.connections().chain(
-                node.body
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|body| body.connections()),
-            ),
-        )
-    }
-    /// Turns this [`ConnectedNode`] into an iterator of the connections in the node's entire tree.
-    pub fn into_connections(self) -> impl Iterator<Item = Connection> {
-        self.map.into_values().flat_map(|node| {
-            let title_connections = node.title.into_connections();
-            let body_connections = node
-                .body
-                .into_iter()
-                .flat_map(|body| body.into_connections());
-            title_connections.chain(body_connections)
-        })
-    }
-    /// Gets an iterator of all the connections in this node's entire tree.
-    pub fn connections(&self) -> impl Iterator<Item = &Connection> {
-        self.map.values().flat_map(|node| {
-            let title_connections = node.title.connections();
-            let body_connections = node
+            node.title = connected_node
+                .title
+                .to_string(&connected_node.connections, format);
+            node.body = connected_node
                 .body
                 .as_ref()
-                .into_iter()
-                .flat_map(|body| body.connections());
-            title_connections.chain(body_connections)
-        })
+                .map(|body| body.to_string(&connected_node.connections, format));
+
+            // Fine to get the children mutably here, we're not changing their levels
+            for child in node.unchecked_mut_children() {
+                detokenise_tree(child, format, nodes);
+            }
+        }
+        // This clone is acceptable because all string-based properties are empty! We're only
+        // cloning metadata.
+        let mut node = self.node.clone();
+        detokenise_tree(&mut node, format, &self.map);
+
+        node
     }
-    /// Gets an iterator of mutable references to all the connections in this node's entire tree.
-    pub fn connections_mut(&mut self) -> impl Iterator<Item = &mut Connection> {
-        self.map.values_mut().flat_map(|node| {
-            let title_connections = node.title.connections_mut();
-            let body_connections = node
-                .body
-                .as_mut()
-                .into_iter()
-                .flat_map(|body| body.connections_mut());
-            title_connections.chain(body_connections)
-        })
+
+    // /// Returns the node at the root of this [`ConnectedNode`]'s tree. This is gated behind a
+    // /// method to emphasise that the returned node *will not* have a title or body defined as more
+    // /// than an empty string and [`None`] respectively. The [`Self::title_for_uuid`] and
+    // /// [`Self::body_for_uuid`] methods should be used to extract these.
+    // pub fn scrubbed_node(&self) -> &StarlingNode {
+    //     &self.node
+    // }
+    /// Returns the details of the node with the given ID in this tree, if it exists.
+    pub fn node(&self, uuid: &Uuid) -> Option<&SingleConnectedNode> {
+        self.map.get(uuid)
     }
+    /// Returns a mutable reference to the details of the node with the given ID in this tree, if
+    /// it exists.
+    pub fn node_mut(&mut self, uuid: &Uuid) -> Option<&mut SingleConnectedNode> {
+        self.map.get_mut(uuid)
+    }
+    // /// Returns the stringified title of the node with the given UUID in this [`ConnectedNode`]'s
+    // /// tree. This returns [`None`] if there is no node with the given ID in this tree.
+    // ///
+    // /// This takes a format to determine how connections should be stringified.
+    // pub fn title_for_uuid(&self, uuid: Uuid, format: Format) -> Option<String> {
+    //     let node = self.map.get(&uuid)?;
+    //     Some(node.title.to_string(format))
+    // }
+    // /// Returns the stringified body of the node with the given UUID in this [`ConnectedNode`]'s
+    // /// tree. This returns [`None`] if there is no node with the given ID in this tree. The inner
+    // /// [`Option`] will be [`None`] if the node exists, but it doesn't have a body.
+    // ///
+    // /// This takes a format to determine how connections should be stringified.
+    // pub fn body_for_uuid(&self, uuid: Uuid, format: Format) -> Option<Option<String>> {
+    //     let node = self.map.get(&uuid)?;
+    //     Some(node.body.as_ref().map(|body| body.to_string(format)))
+    // }
+    // /// Turns this [`ConnectedNode`] into an iterator of the connections in the node's entire tree,
+    // /// with the ID of the node in the tree from which each one came.
+    // pub fn into_connections(self) -> impl Iterator<Item = (Uuid, Connection)> {
+    //     self.map.into_iter().flat_map(|(id, node)| {
+    //         let title_connections = node.title.into_connections().map(move |conn| (id, conn));
+    //         let body_connections = node
+    //             .body
+    //             .into_iter()
+    //             .flat_map(move |body| body.into_connections().map(move |conn| (id, conn)));
+    //         title_connections.chain(body_connections)
+    //     })
+    // }
+    // /// Gets an iterator of all the connections in this node's entire tree, with the ID of the node
+    // /// in the tree from which each one came.
+    // pub fn connections(&self) -> impl Iterator<Item = (&Uuid, &Connection)> {
+    //     self.map.iter().flat_map(|(id, node)| {
+    //         let title_connections = node.title.connections().map(move |conn| (id, conn));
+    //         let body_connections = node
+    //             .body
+    //             .as_ref()
+    //             .into_iter()
+    //             .flat_map(move |body| body.connections().map(move |conn| (id, conn)));
+    //         title_connections.chain(body_connections)
+    //     })
+    // }
+    // /// Gets an iterator of mutable references to all the connections in this node's entire tree,
+    // /// with the ID of the node in the tree from which each one came.
+    // pub fn connections_mut(&mut self) -> impl Iterator<Item = (&Uuid, &mut Connection)> {
+    //     self.map.iter_mut().flat_map(|(id, node)| {
+    //         let title_connections = node.title.connections_mut().map(move |conn| (id, conn));
+    //         let body_connections = node
+    //             .body
+    //             .as_mut()
+    //             .into_iter()
+    //             .flat_map(move |body| body.connections_mut().map(move |conn| (id, conn)));
+    //         title_connections.chain(body_connections)
+    //     })
+    // }
 }
 
-/// A map that maps idea and goal references to their titles. This allows writing connections to
-/// strings.
-///
-/// This *can* also handle citations, but, as these come from a different box, it may not always.
-pub struct ConnectionMap<'a> {
-    pub ideas: HashMap<&'a String, &'a String>,
-    pub goals: HashMap<&'a String, &'a String>,
-    pub citations: Option<HashMap<&'a String, &'a String>>,
+/// A document which has been parsed for connections from the root down. This stores the
+/// attributes, but they are *not* parsed for connections.
+#[derive(Clone)]
+pub struct ConnectedDocument {
+    /// The root node of a connected document.
+    ///
+    /// In our parsing process, the tags and title of this will be correctly parsed and populated,
+    /// but these will be ignored in favour of the raw attributes when serializing back to a string
+    /// document.
+    pub root: ConnectedNode,
+    /// The raw attributes from the original document
+    pub attributes: String,
+}
+impl ConnectedDocument {
+    /// Parses the provided document into a connected document by tokenising its title and body (if
+    /// present).
+    pub fn from_document(document: StarlingDocument, format: Format) -> Self {
+        Self {
+            root: ConnectedNode::from_node(document.root, format),
+            attributes: document.attributes,
+        }
+    }
+    /// Converts [`Self`] back into a regular document by stringifying all the connections in it.
+    /// This will clone the attributes directly.
+    pub fn to_document(&self, format: Format) -> StarlingDocument {
+        StarlingDocument {
+            root: self.root.to_node(format),
+            attributes: self.attributes.clone(),
+        }
+    }
+
+    // /// Turns this [`ConnectedDocument`] into an iterator of the connections in the document's
+    // /// entire tree, with the ID of the node each one came from.
+    // pub fn into_connections(self) -> impl Iterator<Item = (Uuid, Connection)> {
+    //     self.root.into_connections()
+    // }
+    // /// Gets an iterator of all the connections in this document's entire tree, with the ID of the
+    // /// node each one came from.
+    // pub fn connections(&self) -> impl Iterator<Item = (&Uuid, &Connection)> {
+    //     self.root.connections()
+    // }
+    // /// Gets an iterator of mutable references to all the connections in this document's entire
+    // /// tree, with the ID of the node each one came from.
+    // pub fn connections_mut(&mut self) -> impl Iterator<Item = (&Uuid, &mut Connection)> {
+    //     self.root.connections_mut()
+    // }
 }
