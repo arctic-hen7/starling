@@ -3,6 +3,7 @@ mod connection;
 mod debouncer;
 mod error;
 mod graph;
+mod node;
 mod patch;
 mod path_node;
 #[cfg(test)]

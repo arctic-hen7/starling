@@ -67,16 +67,25 @@ type InvalidConnectionsMap = HashMap<Uuid, HashSet<Uuid>>;
 pub struct Graph {
     /// A map of all the nodes in the graph to the paths containing them (which are guaranteed to
     /// exist and contain them).
-    nodes: RwLock<NodeMap>,
+    pub(crate) nodes: RwLock<NodeMap>,
     /// All the paths in the graph, indexed by their (relative) paths. On a rename, an entry will
     /// be removed and recreated here. All the node IDs on a path are guaranteed to exist in the
     /// nodes map and point back to this path.
-    paths: RwLock<PathMap>,
+    pub(crate) paths: RwLock<PathMap>,
     /// A list of invalid connections, indexed by the invalid ID they connected to, and listing in
     /// each entry the set of nodes which made such a connection, by their IDs.
-    invalid_connections: RwLock<InvalidConnectionsMap>,
+    pub(crate) invalid_connections: RwLock<InvalidConnectionsMap>,
 }
 impl Graph {
+    /// Creates a new, completely empty graph. Typically, [`Self::from_dir`] would be used to
+    /// initially populate the graph from a directory.
+    pub fn new() -> Self {
+        Self {
+            nodes: RwLock::new(HashMap::new()),
+            paths: RwLock::new(HashMap::new()),
+            invalid_connections: RwLock::new(HashMap::new()),
+        }
+    }
     /// Creates a new graph, tracking all files in the given directory recursively. This will read
     /// every file that can be parsed and parse them all.
     ///
@@ -90,11 +99,7 @@ impl Graph {
         let creations = DebouncedEvents::start_from_dir(&dir);
         let patch = GraphPatch::from_events(creations).await;
 
-        let this = Self {
-            nodes: RwLock::new(HashMap::new()),
-            paths: RwLock::new(HashMap::new()),
-            invalid_connections: RwLock::new(HashMap::new()),
-        };
+        let this = Self::new();
         this.process_fs_patch(patch).await;
 
         this
@@ -104,12 +109,12 @@ impl Graph {
     /// This will acquire read locks on the paths map and some individual paths as necessary to
     /// generate updates, but it will not write anything directly (though it will call both
     /// [`Self::process_renames`] and [`Self::process_updates`]).
-    async fn process_fs_patch(&self, patch: GraphPatch) {
+    pub async fn process_fs_patch(&self, patch: GraphPatch) {
         // Start with renames (they have to be fully executed before anything else so the right
         // paths are in the map for everything else)
         // TODO: If we can make renames happen at the *end* rather than the start, these could be
         // processed like everything else...
-        self.process_renames(patch.renames);
+        self.process_renames(patch.renames).await;
 
         // Creations, deletions, and modifications need read guards, and so can all be done
         // simultaneously without impacting anything else. Creations can be done synchronously, the
@@ -155,6 +160,9 @@ impl Graph {
             join(join_all(deletion_futs), join_all(modification_futs)).await;
         updates.extend(deletion_updates);
         updates.extend(modification_updates);
+
+        // This doesn't get automatically dropped, so we have to do it manually to avoid a deadlock
+        drop(paths);
 
         self.process_updates(updates.into_iter().map(|v| v.into_iter()).flatten())
             .await;

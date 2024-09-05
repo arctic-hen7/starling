@@ -146,6 +146,9 @@ impl ParallelConnections {
     pub fn valid(&self) -> bool {
         self.valid
     }
+    pub fn types(&self) -> impl Iterator<Item = &str> {
+        self.variants.iter().map(|conn_data| conn_data.ty.as_str())
+    }
 }
 
 pub struct ConnectionRef<'a> {
@@ -159,6 +162,9 @@ impl<'a> ConnectionRef<'a> {
     }
     pub fn is_valid(&self) -> bool {
         self.valid
+    }
+    pub fn types(&self) -> impl Iterator<Item = &str> {
+        self.variants.iter().map(|conn_data| conn_data.ty.as_str())
     }
 }
 pub struct ConnectionMut<'a> {
@@ -357,6 +363,13 @@ pub struct SingleConnectedNode {
     body: Option<ConnectedString>,
     /// The map of connections for both the title and body.
     connections: ConnectionMap,
+    /// The position of the [`StarlingNode`] this corresponds to in the tree from which this
+    /// [`SingleConnectedNode`] was derived. This is expressed as an array of positions in the chld
+    /// vectors of each parent, until this node is reached.
+    ///
+    /// This allows efficiently accessing the non-connection-based properties of nodes by their
+    /// IDs.
+    position: Vec<usize>,
     /// A set of the IDs of other nodes which connect to this one. The ID of a node can be used to
     /// get information about its connections to this one in a series of $O(1)$ lookups.
     ///
@@ -367,7 +380,12 @@ pub struct SingleConnectedNode {
 impl SingleConnectedNode {
     /// Creates a new [`SingleConnectedNode`] from the given strings for a title and body. This
     /// will start with no backlinks.
-    fn new(title_str: String, body_str: Option<String>, format: Format) -> Self {
+    fn new(
+        title_str: String,
+        body_str: Option<String>,
+        position: Vec<usize>,
+        format: Format,
+    ) -> Self {
         let (title, mut title_map) = ConnectedString::from_str(&title_str, format);
         if let Some(body_str) = body_str {
             let (mut body, body_map) = ConnectedString::from_str(&body_str, format);
@@ -403,6 +421,7 @@ impl SingleConnectedNode {
                 title,
                 body: Some(body),
                 connections: title_map,
+                position,
                 backlinks: HashSet::new(),
             }
         } else {
@@ -411,6 +430,7 @@ impl SingleConnectedNode {
                 title,
                 body: None,
                 connections: title_map,
+                position,
                 backlinks: HashSet::new(),
             }
         }
@@ -441,6 +461,12 @@ impl SingleConnectedNode {
     pub fn connections_map(&self) -> &ConnectionMap {
         &self.connections
     }
+    pub fn position(&self) -> &[usize] {
+        &self.position
+    }
+    pub fn title(&self, format: Format) -> String {
+        self.title.to_string(&self.connections, format)
+    }
 }
 
 /// A [`StarlingNode`] which contains parsed connections in its title and/or body.
@@ -458,26 +484,33 @@ impl ConnectedNode {
     /// Parses the provided node into a connected node by tokenising its title and body (if
     /// present).
     fn from_node(mut node: StarlingNode, format: Format) -> Self {
-        // Parse through all the nodes recursively
+        // Parse through all the nodes recursively (recording the positions for later indexing)
         fn tokenise_tree(
             node: &mut StarlingNode,
             format: Format,
             nodes: &mut HashMap<Uuid, SingleConnectedNode>,
+            position: Vec<usize>,
         ) {
             // Parse the title and body as connected strings, scrubbing them out of the original
             // `node`
-            let connected_node =
-                SingleConnectedNode::new(std::mem::take(&mut node.title), node.body.take(), format);
+            let connected_node = SingleConnectedNode::new(
+                std::mem::take(&mut node.title),
+                node.body.take(),
+                position.clone(),
+                format,
+            );
             let id = *node.properties.id;
             nodes.insert(id, connected_node);
 
             // Perfectly safe, we aren't modifying the levels of any children
-            for child in node.unchecked_mut_children() {
-                tokenise_tree(child, format, nodes);
+            for (idx, child) in node.unchecked_mut_children().iter_mut().enumerate() {
+                let mut child_pos = position.clone();
+                child_pos.push(idx);
+                tokenise_tree(child, format, nodes, child_pos);
             }
         }
         let mut map = HashMap::new();
-        tokenise_tree(&mut node, format, &mut map);
+        tokenise_tree(&mut node, format, &mut map, Vec::new());
 
         Self { node, map }
     }
@@ -514,13 +547,12 @@ impl ConnectedNode {
         node
     }
 
-    // /// Returns the node at the root of this [`ConnectedNode`]'s tree. This is gated behind a
-    // /// method to emphasise that the returned node *will not* have a title or body defined as more
-    // /// than an empty string and [`None`] respectively. The [`Self::title_for_uuid`] and
-    // /// [`Self::body_for_uuid`] methods should be used to extract these.
-    // pub fn scrubbed_node(&self) -> &StarlingNode {
-    //     &self.node
-    // }
+    /// Returns the node at the root of this [`ConnectedNode`]'s tree. This is gated behind a
+    /// method to emphasise that the returned node *will not* have a title or body defined as more
+    /// than an empty string and [`None`] respectively.
+    pub fn scrubbed_node(&self) -> &StarlingNode {
+        &self.node
+    }
     /// Returns the details of the node with the given ID in this tree, if it exists.
     pub fn node(&self, uuid: &Uuid) -> Option<&SingleConnectedNode> {
         self.map.get(uuid)
@@ -530,6 +562,11 @@ impl ConnectedNode {
     pub fn node_mut(&mut self, uuid: &Uuid) -> Option<&mut SingleConnectedNode> {
         self.map.get_mut(uuid)
     }
+    // /// Returns the raw [`StarlingNode`] with the given ID, which will *not* have a title or body.
+    // /// This should be used to access node properties only.
+    // pub fn raw_node(&self, uuid: &Uuid) -> Option<&StarlingNode> {
+    //
+    // }
     // /// Returns the stringified title of the node with the given UUID in this [`ConnectedNode`]'s
     // /// tree. This returns [`None`] if there is no node with the given ID in this tree.
     // ///

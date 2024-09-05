@@ -1,6 +1,7 @@
 use crate::graph::GraphUpdate;
+use crate::node::Node;
 use crate::{config::STARLING_CONFIG, connection::ConnectedDocument, error::PathParseError};
-use orgish::{Document, ForceUuidId, Format, Keyword, Node};
+use orgish::{Document, ForceUuidId, Format, Keyword, Node as OrgishNode};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -172,6 +173,41 @@ impl PathNode {
     /// For clarity, this does not *check* that the connection is valid, it simply sets it as
     /// valid.
     pub fn validate_connection(&mut self, from: Uuid, to: Uuid, to_title: String) {}
+
+    /// Gets the root document of this path, if there is one.
+    pub fn document(&self) -> Option<&ConnectedDocument> {
+        self.document.as_ref()
+    }
+    /// Gets the details of the node with the given ID in this path, if it exists.
+    pub fn node_details(&self, uuid: Uuid, explore_child_conns: bool) -> Option<Node> {
+        let document = self.document.as_ref()?;
+        let connected_node = document.root.node(&uuid)?;
+
+        // Traverse down to get the raw `StarlingNode`, accumulating tags along the way.
+        let mut parent_tags = HashSet::new();
+        let mut curr_node = document.root.scrubbed_node();
+        parent_tags.extend(curr_node.tags.iter().cloned());
+        for idx in connected_node.position() {
+            curr_node = &curr_node.children()[*idx];
+            parent_tags.extend(curr_node.tags.iter().cloned());
+        }
+
+        let raw_node = curr_node;
+        // Extract the connections and backlinks on just this node into the representations we want
+        let connections = connected_node
+            .connections()
+            .map(|conn| {
+                let target_node = document.root.node(&conn.id()).unwrap();
+                NodeConnection {
+                    id: conn.id(),
+                    title_parts: target_node.title_parts().cloned().collect(),
+                    types: conn.types().cloned().collect(),
+                }
+            })
+            .collect();
+
+        todo!()
+    }
 
     /// Internal helper function for updating that returns any errors that occur. This is intended
     /// for ergonomically handling errors that occur in the case where reading was successful.
@@ -432,7 +468,7 @@ struct MarkdownFrontmatter {
 /// The Orgish documents used in Starling, based heavily off the global configuration.
 pub type StarlingDocument = Document<StarlingKeyword, ForceUuidId>;
 /// The Orgish nodes used in Starling, based heavily off the global configuration.
-pub type StarlingNode = Node<StarlingKeyword, ForceUuidId>;
+pub type StarlingNode = OrgishNode<StarlingKeyword, ForceUuidId>;
 
 /// A keyword parser for a vertex document that works off the keywords provided in a Starling
 /// configuration.
