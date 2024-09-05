@@ -67,13 +67,20 @@ type InvalidConnectionsMap = HashMap<Uuid, HashSet<Uuid>>;
 pub struct Graph {
     /// A map of all the nodes in the graph to the paths containing them (which are guaranteed to
     /// exist and contain them).
+    ///
+    /// If maps are to be locked, this must always be locked first.
     pub(crate) nodes: RwLock<NodeMap>,
     /// All the paths in the graph, indexed by their (relative) paths. On a rename, an entry will
     /// be removed and recreated here. All the node IDs on a path are guaranteed to exist in the
     /// nodes map and point back to this path.
+    ///
+    /// If maps are to be locked, this must always be locked second. If individual paths are to be
+    /// locked, they should be locked sorted in path order to prevent deadlocks.
     pub(crate) paths: RwLock<PathMap>,
     /// A list of invalid connections, indexed by the invalid ID they connected to, and listing in
     /// each entry the set of nodes which made such a connection, by their IDs.
+    ///
+    /// If maps are to be locked, this must always be locked third.
     pub(crate) invalid_connections: RwLock<InvalidConnectionsMap>,
 }
 impl Graph {
@@ -175,8 +182,8 @@ impl Graph {
             return;
         }
 
-        let mut paths = self.paths.write().await;
         let mut nodes = self.nodes.write().await;
+        let mut paths = self.paths.write().await;
         for (from, to) in renames {
             // If we can't find the original path, we'll leave this
             if let Some(path_node) = paths.remove(&from) {
@@ -197,24 +204,19 @@ impl Graph {
             }
         }
     }
-    /// Processes a series of [`GraphUpdate`]s and modifies the graph accordingly. This method is
-    /// where all locking occurs.
+    /// Processes a series of [`GraphUpdate`]s and modifies the graph accordingly.
     ///
-    /// *Hint: if there's a deadlock, it's happening in here!*
+    /// *Hint: if there's a deadlock, it's probably happening in here!*
     async fn process_updates(&self, updates: impl Iterator<Item = GraphUpdate>) {
-        // Write locks over the maps will go here
-        let mut nodes_fut = None;
-        let mut paths_fut = None;
-        let mut invalid_connections_fut = None;
+        let mut should_lock_nodes = false;
+        let mut should_lock_paths = false;
+        let mut should_lock_invalid_connections = false;
         // These are the IDs of nodes whose paths we'll need to lock (but not all of them will be
         // entered into the nodes map until after stage 1). If any of them don't exist, they'll be
         // from `GraphUpdate::CheckConnection`, so it's fine if they aren't available.
         //
         // We use a `HashSet` to avoid unnecessary doubling-up (which would lead to deadlocks).
         let mut nodes_to_lock = HashSet::new();
-
-        // This is used in multiple places, so we need one `async` block
-        let mut ic_predefined_fut = Some(async { self.invalid_connections.write().await });
 
         // We split updates into those that affect maps only, and those that affect nodes (and
         // possibly the invalid connections map)
@@ -231,21 +233,15 @@ impl Graph {
                 | GraphUpdate::ModifyPathNode { .. }
                 | GraphUpdate::DeletePathNode(_) => {
                     map_updates.push(update);
-                    if paths_fut.is_none() {
-                        paths_fut = Some(async { self.paths.write().await });
-                    }
+                    should_lock_paths = true;
                 }
                 GraphUpdate::AddNode { .. } | GraphUpdate::RemoveNode(_) => {
-                    if nodes_fut.is_none() {
-                        nodes_fut = Some(async { self.nodes.write().await });
-                    }
+                    should_lock_nodes = true;
 
                     // Adding a new node might make some connections that were previously invalid
                     // valid, so we could need the invalid connections map as well
                     if let GraphUpdate::AddNode { id, .. } = update {
-                        if invalid_connections_fut.is_none() {
-                            invalid_connections_fut = Some(ic_predefined_fut.take().unwrap());
-                        }
+                        should_lock_invalid_connections = true;
                         map_updates.push(GraphUpdate::ValidateInvalidConnection { to: id });
                     }
 
@@ -258,9 +254,7 @@ impl Graph {
                 }
                 GraphUpdate::RemoveInvalidConnection { .. } => {
                     map_updates.push(update);
-                    if invalid_connections_fut.is_none() {
-                        invalid_connections_fut = Some(ic_predefined_fut.take().unwrap());
-                    }
+                    should_lock_invalid_connections = true;
                 }
 
                 // Node updates (stage 2)
@@ -281,20 +275,19 @@ impl Graph {
                     nodes_to_lock.insert(to);
 
                     // We also might need to add an invalid connection
-                    if invalid_connections_fut.is_none() {
-                        invalid_connections_fut = Some(ic_predefined_fut.take().unwrap());
-                    }
+                    should_lock_invalid_connections = true;
                 }
             }
         }
 
-        // Lock all the maps we need
-        let (mut nodes, mut paths, mut invalid_connections) = join3(
-            OptionFuture::from(nodes_fut),
-            OptionFuture::from(paths_fut),
-            OptionFuture::from(invalid_connections_fut),
+        // Lock all the maps we need, in the global locking order
+        let mut nodes = OptionFuture::from(should_lock_nodes.then(|| self.nodes.write())).await;
+        let mut paths = OptionFuture::from(should_lock_paths.then(|| self.paths.write())).await;
+        let mut invalid_connections = OptionFuture::from(
+            should_lock_invalid_connections.then(|| self.invalid_connections.write()),
         )
         .await;
+
         // Now we have what we need to run the stage 1 updates (which operate on maps). We'll
         // insert things with new locks here, which doesn't matter because nothing can get at them
         // while we hold write locks over the maps. We'll acquire fine-grained locks *before*
@@ -388,38 +381,51 @@ impl Graph {
             }
         }
 
-        // We'll need to map from node IDs to paths to figure out which paths to lock, so downgrade
-        // any write guards to read guards or separately acquire such read guards
-        let (nodes_ref, paths_ref) = join(
-            async {
-                if let Some(nodes) = nodes {
-                    // This is fine because it's atomic, a writer can't get to this in the meantime and
-                    // access an invalid map state (i.e. without proper connections)
-                    nodes.downgrade()
-                } else {
-                    self.nodes.read().await
-                }
-            },
-            async {
-                if let Some(paths) = paths {
-                    paths.downgrade()
-                } else {
-                    self.paths.read().await
-                }
-            },
-        )
-        .await;
+        // We'll need to map from node IDs to paths to figure out which paths to lock, but we won't
+        // need to change anything about this relation, so it's fine to have `nodes` as a read
+        // guard
+        let nodes_ref = if let Some(nodes) = nodes {
+            nodes.downgrade()
+        } else {
+            self.nodes.read().await
+        };
 
-        // Now we can release the coarse locks and acquire fine-grained locks
-        let path_nodes_futs = nodes_to_lock.into_iter().map(|id| {
-            // We should always be able to find these
-            let path = nodes_ref.get(&id).expect("node ID not found in nodes map");
-            let path_node = paths_ref.get(path).unwrap();
-            async { (path.to_path_buf(), path_node.write().await) }
-        });
-        // This will be used instead of `paths_ref`
-        let mut path_nodes: HashMap<PathBuf, _> =
-            join_all(path_nodes_futs).await.into_iter().collect();
+        // If we don't have a write guard on `self.paths`, then the map is in a valid state right
+        // now, so we can get a read guard to the paths and use that to get our fine-grained write
+        // guards (we'll lock in the global order, so we won't deadlock). However, if we already
+        // have a write guard,, the map is currently in an invalid state (e.g. bad backlinks), so
+        // we can't let anyone else touch it until we have locks over all the affected paths. That
+        // means we need to have a getter which uses the write guard if it exists, or falls back to
+        // the read guard (which will definitely exist if the write guard doesn't).
+        //
+        // Unfortunately, Rust won't let us drop the write guard afterward, but this is better than
+        // state pollution.
+        let paths_ref = OptionFuture::from((!should_lock_paths).then(|| self.paths.read())).await;
+        let path_node_getter = |path: &PathBuf| {
+            if let Some(paths) = paths.as_ref() {
+                paths.get(path)
+            } else {
+                // Guaranteed to exist if we didn't have a write guard
+                paths_ref.as_ref().unwrap().get(path)
+            }
+        };
+
+        // Acquire fine-grained locks on the paths *in-order* to ensure we don't get circular waits
+        // and therefore deadlocks
+        let mut paths_to_lock = nodes_to_lock
+            .into_iter()
+            .map(|id| nodes_ref.get(&id).unwrap())
+            .collect::<Vec<_>>();
+        paths_to_lock.sort_unstable();
+        let mut path_nodes = HashMap::new();
+        for path in paths_to_lock {
+            path_nodes.insert(
+                path.to_path_buf(),
+                path_node_getter(path).unwrap().write().await,
+            );
+        }
+
+        // TODO: Would be great if we could downgrade a possible write guard here...
 
         // We now have everything we need to handle node-level updates
         for update in node_updates {
