@@ -149,8 +149,8 @@ impl PathNode {
         self.path.clone()
     }
     /// Returns the display title of the node with the given ID in this path, if it exists.
-    pub fn display_title(&self, id: Uuid) -> Option<String> {
-        todo!()
+    pub fn display_title(&self, id: Uuid, conn_format: Format) -> Option<String> {
+        Some(self.document()?.root.node(&id)?.title(conn_format))
     }
     /// Gets an iterator of the IDs of all the nodes in this path.
     pub fn ids(&self) -> impl Iterator<Item = &Uuid> {
@@ -159,20 +159,52 @@ impl PathNode {
     /// Adds a backlink to the node in this path with the given ID, coming from the other node with
     /// the given ID. If the requested node to which the backlink should be added is not present in
     /// this path, this will do nothing.
-    pub fn add_backlink(&mut self, on: Uuid, from: Uuid) {}
+    pub fn add_backlink(&mut self, on: Uuid, from: Uuid) {
+        if let Some(node) = self
+            .document
+            .as_mut()
+            .and_then(|doc| doc.root.node_mut(&on))
+        {
+            node.add_backlink(from);
+        }
+    }
     /// Removes a backlink from the node with the given ID on the node in this path with the
     /// given ID. If the node doesn't exist or the requested backlink isn't present, this will do
     /// nothing.
-    pub fn remove_backlink(&mut self, on: Uuid, from: Uuid) {}
+    pub fn remove_backlink(&mut self, on: Uuid, from: Uuid) {
+        if let Some(node) = self
+            .document
+            .as_mut()
+            .and_then(|doc| doc.root.node_mut(&on))
+        {
+            node.remove_backlink(&from);
+        }
+    }
     /// Invalidates a connection on the node with the given ID in this path to the node with the
     /// given ID. If the connection doesn't exist or is already invalid, this will do nothing.
-    pub fn invalidate_connection(&mut self, on: Uuid, to: Uuid) {}
+    pub fn invalidate_connection(&mut self, on: Uuid, to: Uuid) {
+        if let Some(node) = self
+            .document
+            .as_mut()
+            .and_then(|doc| doc.root.node_mut(&on))
+        {
+            node.invalidate_connection(to);
+        }
+    }
     /// Renders the connection from the node in this path with the given ID to the other node with
     /// the given ID as valid, and updates its title to be the provided string.
     ///
     /// For clarity, this does not *check* that the connection is valid, it simply sets it as
     /// valid.
-    pub fn validate_connection(&mut self, from: Uuid, to: Uuid, to_title: String) {}
+    pub fn validate_connection(&mut self, from: Uuid, to: Uuid, to_title: String) {
+        if let Some(node) = self
+            .document
+            .as_mut()
+            .and_then(|doc| doc.root.node_mut(&from))
+        {
+            node.validate_connection(to, to_title);
+        }
+    }
 
     /// Gets the root document of this path, if there is one.
     pub fn document(&self) -> Option<&ConnectedDocument> {

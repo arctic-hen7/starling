@@ -3,6 +3,7 @@ use futures::future::join;
 use futures::future::join3;
 use futures::future::join_all;
 use futures::future::OptionFuture;
+use orgish::Format;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -440,7 +441,20 @@ impl Graph {
                             // Add the backlink first and get the title
                             let path_node_to = path_nodes.get_mut(path_to).unwrap();
                             path_node_to.add_backlink(to, from);
-                            let title = path_node_to.display_title(to).unwrap();
+                            let title = path_node_to
+                                .display_title(
+                                    to,
+                                    // We're getting the title of this node to display in our
+                                    //`from` node, let's use the format of the from node so we
+                                    // implant a title that makes sense (even though we're talking
+                                    // about insane nested connections here...)
+                                    if path_from.extension().unwrap_or_default() == "org" {
+                                        Format::Org
+                                    } else {
+                                        Format::Markdown
+                                    },
+                                )
+                                .unwrap();
 
                             // And then validate the connection and update the title of the target
                             let path_node_from = path_nodes.get_mut(path_from).unwrap();

@@ -453,9 +453,34 @@ impl SingleConnectedNode {
             variants: &mut conn.variants,
         })
     }
+    /// Renders all connections to the node with the given ID invalid.
+    pub fn invalidate_connection(&mut self, to: Uuid) {
+        if let Some(conn) = self.connections.get_mut(&to) {
+            conn.valid = false;
+        }
+    }
+    /// Renders all connections to the node with the given ID valid, and sets their titles to the
+    /// provided string.
+    pub fn validate_connection(&mut self, to: Uuid, to_title: String) {
+        if let Some(conn) = self.connections.get_mut(&to) {
+            conn.valid = true;
+            // The connection is valid, homogeneise all the titles to the correct one
+            for variant in conn.variants.iter_mut() {
+                variant.title = to_title.clone();
+            }
+        }
+    }
     /// Gets an iterator of the IDs of the nodes which link *to* this node.
     pub fn backlinks(&self) -> impl Iterator<Item = &Uuid> {
         self.backlinks.iter()
+    }
+    /// Adds a backlink from the given node, which must exist.
+    pub fn add_backlink(&mut self, from: Uuid) {
+        self.backlinks.insert(from);
+    }
+    /// Removes a backlink from the given node, if one exists.
+    pub fn remove_backlink(&mut self, from: &Uuid) {
+        self.backlinks.remove(from);
     }
     /// Gets the raw map of connections in the title and body of this node.
     pub fn connections_map(&self) -> &ConnectionMap {
