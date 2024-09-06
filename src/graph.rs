@@ -292,9 +292,16 @@ impl Graph {
         // insert things with new locks here, which doesn't matter because nothing can get at them
         // while we hold write locks over the maps. We'll acquire fine-grained locks *before*
         // releasing the coarse locks for this reason.
+        //
+        // We handle pretty much every update as if it might have already happened or might now be
+        // invalid, because one modification might overlap with another (they'll happen
+        // sequentially if they involve some of the same paths due to the global locking order, but
+        // logical overlap/invalidation can still occur).
         for update in map_updates {
             match update {
                 GraphUpdate::CreatePathNode(path_node) => {
+                    // BUG: Multiple adds of the same path that contain different nodes could be a
+                    // problem...
                     debug_assert!(
                         !paths.as_ref().unwrap().contains_key(&path_node.path()),
                         "tried to create new path node that was already present in graph"
@@ -306,6 +313,7 @@ impl Graph {
                         .insert(path_node.path(), RwLock::new(path_node));
                 }
                 GraphUpdate::ModifyPathNode { path, new_node } => {
+                    // TODO: What do we do if this has already been removed?
                     debug_assert!(
                         paths.as_ref().unwrap().contains_key(&path),
                         "tried to modify path node that wasn't in the graph"
@@ -316,14 +324,11 @@ impl Graph {
                     *path_node = RwLock::new(new_node);
                 }
                 GraphUpdate::DeletePathNode(path) => {
-                    debug_assert!(
-                        paths.as_ref().unwrap().contains_key(&path),
-                        "tried to remove path node that wasn't in the graph"
-                    );
                     // This certainly should still exist, but it's no big deal if it doesn't
                     paths.as_mut().unwrap().remove(&path);
                 }
                 GraphUpdate::AddNode { id, path } => {
+                    // BUG: Big problem if this has just been added going to a *different* path...
                     debug_assert!(
                         !nodes.as_ref().unwrap().contains_key(&id),
                         "tried to add node that was already present in graph"
@@ -332,20 +337,10 @@ impl Graph {
                     nodes.as_mut().unwrap().insert(id, path);
                 }
                 GraphUpdate::RemoveNode(node_id) => {
-                    debug_assert!(
-                        nodes.as_ref().unwrap().contains_key(&node_id),
-                        "tried to remove node that wasn't in the graph"
-                    );
-
                     // This certainly should still exist, but it's no big deal if it doesn't
                     nodes.as_mut().unwrap().remove(&node_id);
                 }
                 GraphUpdate::ValidateInvalidConnection { to } => {
-                    debug_assert!(
-                        invalid_connections.as_ref().unwrap().contains_key(&to),
-                        "tried to validate invalid connection that wasn't in the map"
-                    );
-
                     // We'll need to add backlinks to all the nodes that referenced this invalid
                     // connection
                     if let Some(referrers) = invalid_connections.as_mut().unwrap().remove(&to) {
@@ -363,17 +358,7 @@ impl Graph {
                     if let Some(invalid_referrers) =
                         invalid_connections.as_mut().unwrap().get_mut(&from)
                     {
-                        debug_assert!(
-                            invalid_referrers.contains(&to),
-                            "tried to remove invalid connection that wasn't in the map (referrer side)"
-                        );
-
                         invalid_referrers.remove(&to);
-                    } else {
-                        debug_assert!(
-                            false,
-                            "tried to remove invalid connection that wasn't in the map (referent side)"
-                        );
                     }
                 }
 
@@ -447,33 +432,27 @@ impl Graph {
                     }
                 }
                 GraphUpdate::CheckConnection { from, to } => {
-                    // We should never get here, because that would require creating and deleting a
-                    // node in the same instruction set, which *should* be impossible (that would
-                    // just be a modification...)
-                    debug_assert!(
-                        nodes_ref.contains_key(&from),
-                        "tried to check connection from non-existent node"
-                    );
-                    let path_from = nodes_ref.get(&from).unwrap();
+                    // Another instruction *could* have ripped this node out from under us
+                    if let Some(path_from) = nodes_ref.get(&from) {
+                        // Here, if the target doesn't exist, then we should log an invalid connection
+                        // (the existence of this update means we will have a write guard on that map)
+                        if let Some(path_to) = nodes_ref.get(&to) {
+                            // Add the backlink first and get the title
+                            let path_node_to = path_nodes.get_mut(path_to).unwrap();
+                            path_node_to.add_backlink(to, from);
+                            let title = path_node_to.display_title(to).unwrap();
 
-                    // Here, if the target doesn't exist, then we should log an invalid connection
-                    // (the existence of this update means we will have a write guard on that map)
-                    if let Some(path_to) = nodes_ref.get(&to) {
-                        // Add the backlink first and get the title
-                        let path_node_to = path_nodes.get_mut(path_to).unwrap();
-                        path_node_to.add_backlink(to, from);
-                        let title = path_node_to.display_title(to).unwrap();
-
-                        // And then validate the connection and update the title of the target
-                        let path_node_from = path_nodes.get_mut(path_from).unwrap();
-                        path_node_from.validate_connection(from, to, title);
-                    } else {
-                        invalid_connections
-                            .as_mut()
-                            .unwrap()
-                            .entry(from)
-                            .or_insert_with(|| HashSet::new())
-                            .insert(from);
+                            // And then validate the connection and update the title of the target
+                            let path_node_from = path_nodes.get_mut(path_from).unwrap();
+                            path_node_from.validate_connection(from, to, title);
+                        } else {
+                            invalid_connections
+                                .as_mut()
+                                .unwrap()
+                                .entry(from)
+                                .or_insert_with(|| HashSet::new())
+                                .insert(from);
+                        }
                     }
                 }
 
