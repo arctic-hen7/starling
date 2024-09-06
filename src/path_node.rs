@@ -1,5 +1,4 @@
 use crate::graph::GraphUpdate;
-use crate::node::Node;
 use crate::{config::STARLING_CONFIG, connection::ConnectedDocument, error::PathParseError};
 use orgish::{Document, ForceUuidId, Format, Keyword, Node as OrgishNode};
 use serde::Deserialize;

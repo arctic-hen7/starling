@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// A representation of all the information about a single node in the graph.
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct Node {
     /// The node's unique identifier.
     pub id: Uuid,
@@ -40,11 +40,11 @@ pub struct Node {
     pub child_backlinks: HashMap<Uuid, NodeConnection>,
 }
 
-/// A self-contained representation of a connection with (either to or from) another node.
-#[derive(Serialize, Debug)]
+/// A self-contained representation of a connection with (either to or from) another node. This
+/// doesn't include the ID of the other node, just because it's used in maps where that information
+/// is known from the key.
+#[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct NodeConnection {
-    /// The other node's unique identifier.
-    pub id: Uuid,
     /// The other node's raw title.
     pub title: String,
     /// The types of the connection (one node can connect with another multiple times, this
@@ -170,7 +170,6 @@ impl Graph {
                 connections.insert(
                     conn.id(),
                     NodeConnection {
-                        id: conn.id(),
                         title: node.title(conn_format),
                         types: conn.types().map(|s| s.to_string()).collect(),
                     },
@@ -196,8 +195,6 @@ impl Graph {
             backlinks.insert(
                 *backlink_id,
                 NodeConnection {
-                    // ID of the node that made the connection and its title
-                    id: *backlink_id,
                     title: node.title(conn_format),
                     // The types of connections the node made to us can be extracted by looking at
                     // the types of the connection to our node
@@ -254,7 +251,6 @@ impl Graph {
                             child_connections
                                 .entry(conn.id())
                                 .or_insert_with(|| NodeConnection {
-                                    id: conn.id(),
                                     title: node.title(conn_format),
                                     types: HashSet::new(),
                                 })
@@ -291,8 +287,6 @@ impl Graph {
                         child_backlinks
                             .entry(*backlink_id)
                             .or_insert_with(|| NodeConnection {
-                                // ID of the node that made the connection and its title
-                                id: *backlink_id,
                                 title: node.title(conn_format),
                                 types: HashSet::new(),
                             })
