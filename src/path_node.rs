@@ -475,7 +475,7 @@ pub type StarlingNode = OrgishNode<StarlingKeyword, ForceUuidId>;
 /// configuration.
 #[derive(Clone)]
 pub struct StarlingKeyword {
-    keyword: String,
+    pub keyword: String,
 }
 impl Keyword for StarlingKeyword {
     fn from_str(keyword: &str) -> Option<Self> {

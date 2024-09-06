@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 dashmap = "6.0.1"
 futures = "0.3.30"
-orgish = { version = "0.1", path = "../../orgish/orgish/packages/orgish" }
+orgish = { version = "0.1", path = "../../orgish/orgish/packages/orgish", features = [ "serde" ] }
 parking_lot = "0.12.3"
 serde = { version = "1.0.208", features = ["derive"] }
 serde_yaml = "0.9.34"

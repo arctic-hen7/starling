@@ -1,7 +1,7 @@
 use crate::{
     config::{Config, STARLING_CONFIG},
     graph::*,
-    node::{Node, NodeConnection},
+    node::{Node, NodeConnection, NodeOptions},
     patch::{GraphPatch, PathPatch},
 };
 use orgish::Format;
@@ -39,6 +39,17 @@ macro_rules! map {
             map
         }
     };
+}
+
+fn opts_all_conns() -> NodeOptions {
+    NodeOptions {
+        body: false,
+        metadata: false,
+        children: false,
+        connections: true,
+        child_connections: false,
+        conn_format: Format::Markdown,
+    }
 }
 
 // One-stop shop for testing pretty much all fundamental behaviour
@@ -128,8 +139,7 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
         graph
             .get_node(
                 "5d93b936-5952-4707-89dd-69ca06c60850".uuid(),
-                false,
-                Format::Markdown,
+                opts_all_conns(),
             )
             .await
             .unwrap(),
@@ -138,6 +148,9 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
             title: "File 1".into(),
             tags: ["hello", "world"].into_hs(),
             parent_tags: [].into(),
+            children: Vec::new(),
+            metadata: None,
+            body: None,
             connections: map! {},
             backlinks: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
@@ -154,8 +167,7 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
         graph
             .get_node(
                 "5d93b936-5952-4707-89dd-69ca06c60851".uuid(),
-                false,
-                Format::Markdown,
+                opts_all_conns(),
             )
             .await
             .unwrap(),
@@ -164,6 +176,9 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
             title: "Node 1".into(),
             tags: ["parent_tag"].into_hs(),
             parent_tags: ["hello", "world"].into_hs(),
+            children: Vec::new(),
+            metadata: None,
+            body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60855".uuid() => NodeConnection {
                     title: "File 2".into(),
@@ -185,8 +200,7 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
         graph
             .get_node(
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid(),
-                false,
-                Format::Markdown,
+                opts_all_conns(),
             )
             .await
             .unwrap(),
@@ -195,6 +209,9 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
             title: "Node 1.1".into(),
             tags: [].into(),
             parent_tags: ["hello", "world", "parent_tag"].into_hs(),
+            children: Vec::new(),
+            metadata: None,
+            body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60850".uuid() => NodeConnection {
                     title: "File 1".into(),
@@ -217,8 +234,7 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
         graph
             .get_node(
                 "5d93b936-5952-4707-89dd-69ca06c60853".uuid(),
-                false,
-                Format::Markdown,
+                opts_all_conns(),
             )
             .await
             .unwrap(),
@@ -227,6 +243,9 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
             title: "Node 1.1.1".into(),
             tags: ["child_tag"].into_hs(),
             parent_tags: ["hello", "world", "parent_tag"].into_hs(),
+            children: Vec::new(),
+            metadata: None,
+            body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
                     title: "Node 1.1".into(),
@@ -245,8 +264,7 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
         graph
             .get_node(
                 "5d93b936-5952-4707-89dd-69ca06c60854".uuid(),
-                false,
-                Format::Markdown,
+                opts_all_conns(),
             )
             .await
             .unwrap(),
@@ -255,6 +273,9 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
             title: "Node 2".into(),
             tags: [].into_hs(),
             parent_tags: ["hello", "world"].into_hs(),
+            children: Vec::new(),
+            metadata: None,
+            body: None,
             connections: map! {},
             backlinks: map! {},
             child_connections: map! {},
@@ -266,8 +287,7 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
         graph
             .get_node(
                 "5d93b936-5952-4707-89dd-69ca06c60855".uuid(),
-                false,
-                Format::Markdown,
+                opts_all_conns(),
             )
             .await
             .unwrap(),
@@ -276,6 +296,9 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
             title: "File 2".into(),
             tags: ["foo"].into_hs(),
             parent_tags: [].into(),
+            children: Vec::new(),
+            metadata: None,
+            body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60851".uuid() => NodeConnection {
                     title: "Node 1".into(),

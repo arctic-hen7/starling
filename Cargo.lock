@@ -93,6 +93,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-targets",
 ]
@@ -355,6 +356,7 @@ name = "orgish"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde",
  "thiserror",
  "uuid",
 ]

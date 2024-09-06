@@ -492,6 +492,9 @@ impl SingleConnectedNode {
     pub fn title(&self, format: Format) -> String {
         self.title.to_string(&self.connections, format)
     }
+    pub fn body(&self, format: Format) -> Option<String> {
+        Some(self.body.as_ref()?.to_string(&self.connections, format))
+    }
 }
 
 /// A [`StarlingNode`] which contains parsed connections in its title and/or body.
