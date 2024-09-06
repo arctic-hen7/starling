@@ -77,13 +77,12 @@ impl Graph {
         // `StarlingNode`
         let document = path_node.document()?;
         let connected_node = document.root.node(&uuid)?;
-        // Traverse down to get the raw `StarlingNode`, accumulating tags along the way.
+        // Traverse down to get the raw `StarlingNode`, accumulating tags along the way
         let mut parent_tags = HashSet::new();
         let mut curr_node = document.root.scrubbed_node();
-        parent_tags.extend(curr_node.tags.iter().cloned());
         for idx in connected_node.position() {
-            curr_node = &curr_node.children()[*idx];
             parent_tags.extend(curr_node.tags.iter().cloned());
+            curr_node = &curr_node.children()[*idx];
         }
         // This is the `StarlingNode` with children and other properties
         let raw_node = curr_node;
