@@ -1,4 +1,3 @@
-use futures::future::{join, join4, join_all};
 use orgish::Format;
 use serde::Serialize;
 use std::{
@@ -9,13 +8,13 @@ use tokio::sync::RwLockReadGuard;
 use uuid::Uuid;
 
 use crate::{
-    connection::{ConnectedNode, ConnectionRef},
+    connection::ConnectedNode,
     graph::Graph,
     path_node::{PathNode, StarlingNode},
 };
 
 /// A representation of all the information about a single node in the graph.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Node {
     /// The node's unique identifier.
     pub id: Uuid,
@@ -42,7 +41,7 @@ pub struct Node {
 }
 
 /// A self-contained representation of a connection with (either to or from) another node.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct NodeConnection {
     /// The other node's unique identifier.
     pub id: Uuid,
@@ -90,8 +89,8 @@ impl Graph {
         let raw_node = curr_node;
 
         // We'll need to read-lock multiple other paths to get the details of connections and
-        // backlinks; those will all go into a map of read guards (including the one we've already
-        // got!!). We need to lock them in order, so first keep track of them all.
+        // backlinks; those will all go into a map of read guards. We need to lock them in order,
+        // so first keep track of them all.
         let mut nodes_to_lock = HashSet::new();
 
         // We'll need to lock connections in the root
@@ -142,6 +141,11 @@ impl Graph {
         paths_to_lock.sort_unstable();
         let mut path_refs = HashMap::new();
         for path in paths_to_lock {
+            // Trying to lock the path we've already locked is a bad idea...
+            if path == node_path {
+                continue;
+            }
+
             path_refs.insert(path.clone(), paths.get(path).unwrap().read().await);
         }
 
@@ -151,7 +155,12 @@ impl Graph {
         let mut backlinks = HashMap::new();
         for conn in connected_node.connections() {
             if conn.is_valid() {
-                let path_node = path_refs.get(nodes.get(&conn.id()).unwrap()).unwrap();
+                let path = nodes.get(&conn.id()).unwrap();
+                let path_node = if path == node_path {
+                    &path_node
+                } else {
+                    path_refs.get(nodes.get(&conn.id()).unwrap()).unwrap()
+                };
                 // We're guaranteed to have a document, because we have a connection to a node in
                 // there
                 let node = path_node.document().unwrap().root.node(&conn.id()).unwrap();
@@ -167,7 +176,12 @@ impl Graph {
             }
         }
         for backlink_id in connected_node.backlinks() {
-            let path_node = path_refs.get(nodes.get(backlink_id).unwrap()).unwrap();
+            let path = nodes.get(backlink_id).unwrap();
+            let path_node = if path == node_path {
+                &path_node
+            } else {
+                path_refs.get(nodes.get(backlink_id).unwrap()).unwrap()
+            };
             // We're guaranteed to have a document, because we have a backlink to a node in
             // there
             let node = path_node
@@ -206,6 +220,8 @@ impl Graph {
                 path_refs: &HashMap<PathBuf, RwLockReadGuard<PathNode>>,
                 child_connections: &mut HashMap<Uuid, NodeConnection>,
                 child_backlinks: &mut HashMap<Uuid, NodeConnection>,
+                node_path: &PathBuf,
+                path_node: &RwLockReadGuard<PathNode>,
                 conn_format: Format,
             ) {
                 // For each of the children, get its `SingleConnectedNode` by ID, and then handle
@@ -216,7 +232,12 @@ impl Graph {
                     let connected_node = connected_root.node(&child.properties.id).unwrap();
                     for conn in connected_node.connections() {
                         if conn.is_valid() {
-                            let path_node = path_refs.get(nodes.get(&conn.id()).unwrap()).unwrap();
+                            let path = nodes.get(&conn.id()).unwrap();
+                            let path_node = if path == node_path {
+                                path_node
+                            } else {
+                                path_refs.get(nodes.get(&conn.id()).unwrap()).unwrap()
+                            };
                             // We're guaranteed to have a document, because we have a connection to a node in
                             // there
                             let node = path_node.document().unwrap().root.node(&conn.id()).unwrap();
@@ -240,7 +261,12 @@ impl Graph {
                         }
                     }
                     for backlink_id in connected_node.backlinks() {
-                        let path_node = path_refs.get(nodes.get(backlink_id).unwrap()).unwrap();
+                        let path = nodes.get(backlink_id).unwrap();
+                        let path_node = if path == node_path {
+                            path_node
+                        } else {
+                            path_refs.get(nodes.get(backlink_id).unwrap()).unwrap()
+                        };
                         // We're guaranteed to have a document, because we have a backlink to a node in
                         // there
                         let node = path_node
@@ -279,6 +305,8 @@ impl Graph {
                         path_refs,
                         child_connections,
                         child_backlinks,
+                        node_path,
+                        path_node,
                         conn_format,
                     );
                 }
@@ -291,6 +319,8 @@ impl Graph {
                 &path_refs,
                 &mut child_connections,
                 &mut child_backlinks,
+                node_path,
+                &path_node,
                 conn_format,
             );
         }
