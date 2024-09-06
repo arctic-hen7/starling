@@ -136,7 +136,10 @@ impl Graph {
         // fine-grained locking we do for updates in `graph.rs`, but with read guards instead)
         let mut paths_to_lock = nodes_to_lock
             .into_iter()
-            .map(|id| nodes.get(&id).unwrap())
+            .filter_map(|id| nodes.get(&id))
+            // Ensure there are no duplicates
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         paths_to_lock.sort_unstable();
         let mut path_refs = HashMap::new();

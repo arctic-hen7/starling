@@ -1,6 +1,5 @@
 use crate::{debouncer::DebouncedEvents, patch::GraphPatch, path_node::PathNode};
 use futures::future::join;
-use futures::future::join3;
 use futures::future::join_all;
 use futures::future::OptionFuture;
 use orgish::Format;
@@ -397,10 +396,14 @@ impl Graph {
         };
 
         // Acquire fine-grained locks on the paths *in-order* to ensure we don't get circular waits
-        // and therefore deadlocks
+        // and therefore deadlocks; not every node will resolve because some will be invalid
+        // `CheckConnection`s
         let mut paths_to_lock = nodes_to_lock
             .into_iter()
-            .map(|id| nodes_ref.get(&id).unwrap())
+            .filter_map(|id| nodes_ref.get(&id))
+            // Ensure there are no duplicates
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
         paths_to_lock.sort_unstable();
         let mut path_nodes = HashMap::new();
