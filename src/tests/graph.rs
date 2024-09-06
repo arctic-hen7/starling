@@ -47,7 +47,7 @@ fn opts_all_conns() -> NodeOptions {
         metadata: false,
         children: false,
         connections: true,
-        child_connections: false,
+        child_connections: true,
         conn_format: Format::Markdown,
     }
 }
@@ -101,6 +101,8 @@ Here's a link to a [nonexistent node](6d93b936-5952-4707-89dd-69ca06c60854). But
 <!--PROPERTIES
 ID: 5d93b936-5952-4707-89dd-69ca06c60854
 -->
+
+Here's another link to [Node 1.1](5d93b936-5952-4707-89dd-69ca06c60852), using a different type, so it should be amalgamated in the child connections.
 "#;
     let file_2 = r#"---
 title: File 2
@@ -158,8 +160,36 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
                     types: ["link"].into_hs()
                 }
             },
-            child_connections: map! {},
-            child_backlinks: map! {}
+            child_connections: map! {
+                "5d93b936-5952-4707-89dd-69ca06c60855".uuid() => NodeConnection {
+                    title: "File 2".into(),
+                    types: ["link"].into_hs()
+                },
+                "5d93b936-5952-4707-89dd-69ca06c60850".uuid() => NodeConnection {
+                    title: "File 1".into(),
+                    types: ["link"].into_hs()
+                },
+                "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
+                    title: "Node 1.1".into(),
+                    // Types from connections across nodes get combined
+                    types: ["link", "other"].into_hs()
+                }
+            },
+            child_backlinks: map! {
+                "5d93b936-5952-4707-89dd-69ca06c60855".uuid() => NodeConnection {
+                    title: "File 2".into(),
+                    types: ["link", "other"].into_hs()
+                },
+                "5d93b936-5952-4707-89dd-69ca06c60853".uuid() => NodeConnection {
+                    title: "Node 1.1.1".into(),
+                    // Invalid type `thing` doesn't get registered
+                    types: ["other"].into_hs()
+                },
+                "5d93b936-5952-4707-89dd-69ca06c60854".uuid() => NodeConnection {
+                    title: "Node 2".into(),
+                    types: ["link"].into_hs()
+                }
+            }
         }
     );
     // Node 1
@@ -191,8 +221,27 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
                     types: ["link", "other"].into_hs()
                 }
             },
-            child_connections: map! {},
-            child_backlinks: map! {}
+            child_connections: map! {
+                "5d93b936-5952-4707-89dd-69ca06c60850".uuid() => NodeConnection {
+                    title: "File 1".into(),
+                    types: ["link"].into_hs()
+                },
+                "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
+                    title: "Node 1.1".into(),
+                    types: ["other"].into_hs()
+                }
+            },
+            child_backlinks: map! {
+                "5d93b936-5952-4707-89dd-69ca06c60853".uuid() => NodeConnection {
+                    title: "Node 1.1.1".into(),
+                    // Invalid type `thing` doesn't get registered
+                    types: ["other"].into_hs()
+                },
+                "5d93b936-5952-4707-89dd-69ca06c60854".uuid() => NodeConnection {
+                    title: "Node 2".into(),
+                    types: ["link"].into_hs()
+                }
+            }
         }
     );
     // Node 1.1
@@ -223,9 +272,18 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
                     title: "Node 1.1.1".into(),
                     // Invalid type `thing` doesn't get registered
                     types: ["other"].into_hs()
+                },
+                "5d93b936-5952-4707-89dd-69ca06c60854".uuid() => NodeConnection {
+                    title: "Node 2".into(),
+                    types: ["link"].into_hs()
                 }
             },
-            child_connections: map! {},
+            child_connections: map! {
+                "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
+                    title: "Node 1.1".into(),
+                    types: ["other"].into_hs()
+                }
+            },
             child_backlinks: map! {}
         }
     );
@@ -276,7 +334,12 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
             children: Vec::new(),
             metadata: None,
             body: None,
-            connections: map! {},
+            connections: map! {
+                "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
+                    title: "Node 1.1".into(),
+                    types: ["link"].into_hs()
+                }
+            },
             backlinks: map! {},
             child_connections: map! {},
             child_backlinks: map! {}
