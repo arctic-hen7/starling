@@ -42,8 +42,6 @@ pub enum GraphUpdate {
     /// global tracker as invalid, as valid. This will involve creating a backlink on every node
     /// that referenced it, and removing the entry from the global tracker.
     ///
-    /// Currently, this is generated when a [`GraphUpdate::AddNode`] instruction is encountered.
-    ///
     /// Any paths found to be referencing this previously invalid connection will be written to
     /// disk with updated connection titles (handled through the [`GraphUpdate::CheckConnection`]
     /// instructions this implicitly generates).
@@ -126,7 +124,10 @@ impl Graph {
     /// This will acquire read locks on the paths map and some individual paths as necessary to
     /// generate updates, but it will not write anything directly (though it will call both
     /// [`Self::process_renames`] and [`Self::process_updates`]).
-    pub async fn process_fs_patch(&self, patch: GraphPatch) {
+    ///
+    /// Like [`Self::process_updates`], this will return a list of paths and the contents that
+    /// should be written to them.
+    pub async fn process_fs_patch(&self, patch: GraphPatch) -> Vec<(PathBuf, String)> {
         // Start with renames (they have to be fully executed before anything else so the right
         // paths are in the map for everything else)
         // TODO: If we can make renames happen at the *end* rather than the start, these could be
@@ -182,7 +183,7 @@ impl Graph {
         drop(paths);
 
         self.process_updates(updates.into_iter().map(|v| v.into_iter()).flatten())
-            .await;
+            .await
     }
     /// Fully processes the given array of renames (where each tuple is a `from` and then `to`
     /// path). This will update the paths map and all the nodes in the renamed paths.
@@ -238,10 +239,10 @@ impl Graph {
         let mut map_updates = Vec::new();
         let mut node_updates = Vec::new();
 
-        // We'll also keep track of the paths that need to be updated on the disk (i.e. those with
-        // new nodes which might need IDs written if they were created in parsing, and those that
-        // link to nodes which have had their titles changed). It is the adder's responsibility to
-        // ensure that all paths in here are going to be locked!!
+        // This will keep track of paths we need to write to (i.e. any new nodes or validated
+        // connections), which will be because they have new IDs (possibly forced and we need to
+        // make them permanent) or new/updated connections, or one of their connection targets
+        // updated its title.
         let mut paths_to_write = HashSet::new();
 
         for update in updates {
@@ -263,7 +264,6 @@ impl Graph {
                     // valid, so we could need the invalid connections map as well
                     if let GraphUpdate::AddNode { id, ref path } = update {
                         should_lock_invalid_connections = true;
-                        map_updates.push(GraphUpdate::ValidateInvalidConnection { to: id });
 
                         // A new node might have had an ID force-created for it during parsing, so
                         // we should write this path back to the disk to ensure ID stability
@@ -276,9 +276,10 @@ impl Graph {
                     map_updates.push(update);
                 }
                 GraphUpdate::ValidateInvalidConnection { .. } => {
-                    // This is part of `AddNode`, we shouldn't ever reach it independently
-                    // (currently)
-                    debug_assert!(false, "reached instruction to validate invalid connection independently of adding a node");
+                    should_lock_invalid_connections = true;
+                    map_updates.push(update);
+                    // We will need to lock some nodes, but we don't know which ones until we see
+                    // the map
                 }
                 GraphUpdate::RemoveInvalidConnection { .. } => {
                     map_updates.push(update);
@@ -297,7 +298,8 @@ impl Graph {
                 GraphUpdate::CheckConnection { from, to } => {
                     node_updates.push(update);
                     // We'll need to read the `from` path node and possibly modify the connection
-                    // in it to be valid
+                    // in it to be valid; also might need to write this whole path to its source if
+                    // it's valid (to rewrite titles)
                     nodes_to_lock.insert(from);
                     // And we might need to add a backlink to `to`, if it exists
                     nodes_to_lock.insert(to);
@@ -372,14 +374,14 @@ impl Graph {
                     // We'll need to add backlinks to all the nodes that referenced this invalid
                     // connection
                     if let Some(referrers) = invalid_connections.as_mut().unwrap().remove(&to) {
-                        // This will almost certainly already be accounted for by other connection
-                        // checking instructions, but it's worth doubling up
                         nodes_to_lock.insert(to);
 
                         for referrer in referrers {
-                            // We're adding this update late, so we have to make sure we do
-                            // everything it needs: the invalid connections map is already locked,
-                            // and we've locked both ends of the connection, so we're good
+                            // NOTE: This is the only instance where we retroactively add an
+                            // update. We replicate perfectly the logic we would have used to
+                            // handle it though, including ordering the locking of the appropriate
+                            // nodes, so in this case, this violation of the overall paradigm is
+                            // acceptable.
                             node_updates.push(GraphUpdate::CheckConnection { from: referrer, to });
                             nodes_to_lock.insert(referrer);
                         }

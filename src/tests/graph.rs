@@ -5,6 +5,7 @@ use crate::{
     patch::{GraphPatch, PathPatch},
 };
 use orgish::Format;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -41,6 +42,7 @@ macro_rules! map {
     };
 }
 
+/// Produces options for retrieving a node and all information about its connections.
 fn opts_all_conns() -> NodeOptions {
     NodeOptions {
         body: false,
@@ -102,8 +104,7 @@ Here's a link to a [nonexistent node](6d93b936-5952-4707-89dd-69ca06c60854). But
 ID: 5d93b936-5952-4707-89dd-69ca06c60854
 -->
 
-Here's another link to [Node 1.1](5d93b936-5952-4707-89dd-69ca06c60852), using a different type, so it should be amalgamated in the child connections.
-"#;
+Here's another link to [Node 1.1](5d93b936-5952-4707-89dd-69ca06c60852), using a different type, so it should be amalgamated in the child connections."#;
     let file_2 = r#"---
 title: File 2
 tags:
@@ -114,10 +115,12 @@ ID: 5d93b936-5952-4707-89dd-69ca06c60855
 -->
 
 We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707-89dd-69ca06c60851). We'll actually have another link there of a different type too: [Node 1](other:5d93b936-5952-4707-89dd-69ca06c60851).
-"#;
+
+# Node 2.1
+This deliberately doesn't have an ID."#;
 
     let graph = Graph::new();
-    graph
+    let writes: HashMap<_, _> = graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
             deletions: Vec::new(),
@@ -133,7 +136,30 @@ We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707
             ],
             modifications: Vec::new(),
         })
-        .await;
+        .await
+        .into_iter()
+        .collect();
+    // File 1 should have some titles rewritten and link qualified
+    assert_eq!(
+        writes.get(&PathBuf::from("file_1.md")).unwrap(),
+        &file_1
+            .replace("[this](other:", "[Node 1.1](other:")
+            .replace("](5d", "](link:5d")
+            // Invalid ID is still an ID
+            .replace("](6d", "](link:6d")
+    );
+    // File 2 should *start* with the same up to node 2.1
+    let file_2_updated = writes.get(&PathBuf::from("file_2.md")).unwrap();
+    assert_eq!(
+        file_2_updated.split("# Node 2").next().unwrap(),
+        file_2
+            .replace("](5d", "](link:5d")
+            .split("# Node 2")
+            .next()
+            .unwrap()
+    );
+    // And it should end with something indicating an ID has been added to node 2.1
+    assert!(file_2_updated.ends_with("-->\nThis deliberately doesn't have an ID."));
 
     // Get details about all the nodes
     // File 1

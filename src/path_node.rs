@@ -372,6 +372,9 @@ impl PathNode {
                     id: *new_node_id,
                     path: path.clone(),
                 });
+                // Also be sure to validate any previously invalid connections to the ID of our new
+                // node
+                updates.push(GraphUpdate::ValidateInvalidConnection { to: *new_node_id });
                 // We'll need to check all of this node's connections, they're all new (no point in
                 // using info from other nodes in this tree to check validity, we'll need to create
                 // backlinks anyway)
@@ -431,6 +434,30 @@ impl PathNode {
                             from: *retained_node_id,
                             to: id,
                         })
+                    }
+                }
+
+                // Transfer all the backlinks over (graph updates from other updated nodes will
+                // tell us which to heed)
+                for backlink_id in old_node.backlinks() {
+                    new_node.add_backlink(*backlink_id);
+                }
+
+                // Check if the title has been changed (remember this will apply to the root node
+                // as well); it doesn't matter which format we use for this
+                let old_title = old_node.title(Format::Markdown);
+                let new_title = new_node.title(Format::Markdown);
+                if old_title != new_title {
+                    // The title has changed, we should revalidate all connections from other nodes
+                    // to this one (i.e. the backlinks). We don't have all the backlinks that
+                    // *will* be present, but we don't need to, because any new ones will see the
+                    // new title anyway. We only care about the existing ones, and including ones
+                    // that end up invalid is fine, because they'll be invalidated anyway!
+                    for backlink_id in new_node.backlinks() {
+                        updates.push(GraphUpdate::CheckConnection {
+                            from: *backlink_id,
+                            to: *retained_node_id,
+                        });
                     }
                 }
             }
