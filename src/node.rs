@@ -23,6 +23,8 @@ pub struct Node {
     pub id: Uuid,
     /// The title of this node.
     pub title: String,
+    /// The path this node came from.
+    pub path: PathBuf,
     /// The tags on this node itself. There will be no duplicates here.
     pub tags: HashSet<String>,
     /// The tags on this node's parents. There will be no duplicates here.
@@ -133,6 +135,38 @@ pub struct NodeOptions {
     pub child_connections: bool,
     /// The format links should be serialized to (Markdown or Org).
     pub conn_format: Format,
+}
+impl NodeOptions {
+    pub fn new(format: Format) -> Self {
+        Self {
+            body: false,
+            metadata: false,
+            children: false,
+            connections: false,
+            child_connections: false,
+            conn_format: format,
+        }
+    }
+    pub fn body(mut self, v: bool) -> Self {
+        self.body = v;
+        self
+    }
+    pub fn metadata(mut self, v: bool) -> Self {
+        self.metadata = v;
+        self
+    }
+    pub fn children(mut self, v: bool) -> Self {
+        self.children = v;
+        self
+    }
+    pub fn connections(mut self, v: bool) -> Self {
+        self.connections = v;
+        self
+    }
+    pub fn child_connections(mut self, v: bool) -> Self {
+        self.child_connections = v;
+        self
+    }
 }
 
 impl Graph {
@@ -429,6 +463,7 @@ impl Graph {
         Some(Node {
             id: uuid,
             title: connected_node.title(options.conn_format),
+            path: node_path.clone(),
             tags: raw_node.tags.iter().cloned().collect(),
             parent_tags,
 
