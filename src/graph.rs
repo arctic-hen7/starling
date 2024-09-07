@@ -21,6 +21,9 @@ pub enum GraphUpdate {
     DeletePathNode(PathBuf),
     /// The provided node should be added to the graph. This does *not* include a connection
     /// validation instruction.
+    ///
+    /// As new nodes may have IDs that have been force-generated during parsing, any paths subject
+    /// to one of these will be written to disk.
     AddNode { id: Uuid, path: PathBuf },
     /// The node with the given ID should be removed. This will correspond to a blatant deletion of
     /// the node from the map of all nodes (i.e. connections will *not* be handled, and separate
@@ -40,6 +43,10 @@ pub enum GraphUpdate {
     /// that referenced it, and removing the entry from the global tracker.
     ///
     /// Currently, this is generated when a [`GraphUpdate::AddNode`] instruction is encountered.
+    ///
+    /// Any paths found to be referencing this previously invalid connection will be written to
+    /// disk with updated connection titles (handled through the [`GraphUpdate::CheckConnection`]
+    /// instructions this implicitly generates).
     ValidateInvalidConnection { to: Uuid },
     /// We should check if the connection from the node with the given ID to the node with the
     /// given ID is valid. If so, we should set it as valid and create an appropriate backlink, and
@@ -50,6 +57,9 @@ pub enum GraphUpdate {
     /// Note that this is also used for rendering valid connections that were previously marked as
     /// invalid in the global tracker when a node with the (invalid) ID they pointed to is created
     /// (in which case we know this will succeed).
+    ///
+    /// If the connection is found to be valid, the path which made the connection will be written
+    /// to disk with any updated connection titles.
     CheckConnection { from: Uuid, to: Uuid },
     /// We should set the connection on the node with the given ID which goes to the other node
     /// with the given ID to be invalid. This is used when the node to which the connection goes is
@@ -204,10 +214,15 @@ impl Graph {
             }
         }
     }
-    /// Processes a series of [`GraphUpdate`]s and modifies the graph accordingly.
+    /// Processes a series of [`GraphUpdate`]s and modifies the graph accordingly. This will return
+    /// a list of paths which need to be updated on the disk and the string contents that should be
+    /// written to them.
     ///
     /// *Hint: if there's a deadlock, it's probably happening in here!*
-    async fn process_updates(&self, updates: impl Iterator<Item = GraphUpdate>) {
+    async fn process_updates(
+        &self,
+        updates: impl Iterator<Item = GraphUpdate>,
+    ) -> Vec<(PathBuf, String)> {
         let mut should_lock_nodes = false;
         let mut should_lock_paths = false;
         let mut should_lock_invalid_connections = false;
@@ -222,6 +237,12 @@ impl Graph {
         // possibly the invalid connections map)
         let mut map_updates = Vec::new();
         let mut node_updates = Vec::new();
+
+        // We'll also keep track of the paths that need to be updated on the disk (i.e. those with
+        // new nodes which might need IDs written if they were created in parsing, and those that
+        // link to nodes which have had their titles changed). It is the adder's responsibility to
+        // ensure that all paths in here are going to be locked!!
+        let mut paths_to_write = HashSet::new();
 
         for update in updates {
             match update {
@@ -240,9 +261,16 @@ impl Graph {
 
                     // Adding a new node might make some connections that were previously invalid
                     // valid, so we could need the invalid connections map as well
-                    if let GraphUpdate::AddNode { id, .. } = update {
+                    if let GraphUpdate::AddNode { id, ref path } = update {
                         should_lock_invalid_connections = true;
                         map_updates.push(GraphUpdate::ValidateInvalidConnection { to: id });
+
+                        // A new node might have had an ID force-created for it during parsing, so
+                        // we should write this path back to the disk to ensure ID stability
+                        paths_to_write.insert(path.clone());
+                        // We need to lock that path in order to write to it, and this ID comes
+                        // from it, so locking that is sufficient
+                        nodes_to_lock.insert(id);
                     }
 
                     map_updates.push(update);
@@ -349,6 +377,9 @@ impl Graph {
                         nodes_to_lock.insert(to);
 
                         for referrer in referrers {
+                            // We're adding this update late, so we have to make sure we do
+                            // everything it needs: the invalid connections map is already locked,
+                            // and we've locked both ends of the connection, so we're good
                             node_updates.push(GraphUpdate::CheckConnection { from: referrer, to });
                             nodes_to_lock.insert(referrer);
                         }
@@ -462,6 +493,10 @@ impl Graph {
                             // And then validate the connection and update the title of the target
                             let path_node_from = path_nodes.get_mut(path_from).unwrap();
                             path_node_from.validate_connection(from, to, title);
+
+                            // We've updated a title, which means we need to write the from path
+                            // back to the disk (this path is guaranteed already locked)
+                            paths_to_write.insert(path_from.clone());
                         } else {
                             invalid_connections
                                 .as_mut()
@@ -477,7 +512,27 @@ impl Graph {
             }
         }
 
-        // All fine-grained and coarse-grained locks are dropped here, and the map is in a valid
-        // state
+        // All the paths we need to write to are guaranteed to be locked, so go through them and
+        // convert their documents to strings
+        paths_to_write
+            .into_iter()
+            .filter_map(|path| {
+                let path_node = path_nodes.get(&path).unwrap();
+                // There most certainly should be a document currently, but for future-proofness
+                // we'll allow there not to be
+                let format = if path.extension().unwrap_or_default() == "org" {
+                    Format::Org
+                } else {
+                    Format::Markdown
+                };
+                Some((
+                    path,
+                    path_node
+                        .document()?
+                        .to_document(format)
+                        .into_string(format),
+                ))
+            })
+            .collect()
     }
 }
