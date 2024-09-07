@@ -202,7 +202,7 @@ impl Graph {
                 let path_node_ref = path_node.try_read().unwrap();
                 for node_id in path_node_ref.ids() {
                     let node_path = nodes.get_mut(node_id).unwrap();
-                    *node_path = path_node_ref.path();
+                    *node_path = to.clone();
                 }
                 drop(path_node_ref);
 
