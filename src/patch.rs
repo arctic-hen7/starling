@@ -13,6 +13,11 @@ pub struct GraphPatch {
     /// A list of paths in the domain which have been renamed from the first element of the tuple
     /// to the second.
     ///
+    /// **Important:** these may not necessarily exist. If a path is created and then deleted, and
+    /// renamed in between, this will still record that rename! Similarly, if a path is created,
+    /// and then renamed, the creation event returned will be on the new path, but the rename will
+    /// still exist!
+    ///
     /// As with a set of [`DebouncedEvents`], these must be processed first.
     pub renames: Vec<(PathBuf, PathBuf)>,
     /// A list of paths in the domain which have been deleted.
@@ -32,19 +37,28 @@ impl GraphPatch {
         let mut modifications_futs = Vec::new();
         let mut renames = Vec::new();
         let mut deletions = Vec::new();
-        for event in events.into_vec() {
-            match event {
-                Event::Rename(from, to) => renames.push((from, to)),
-                Event::Delete(path) => deletions.push(path),
-                Event::Create(path) => {
-                    if let Some(patch_fut) = PathPatch::new(path) {
-                        creations_futs.push(patch_fut);
+        for (new_path, old_path, event) in events.into_iter() {
+            // If there's an old path, we have a rename
+            if let Some(old_path) = old_path {
+                renames.push((old_path, new_path.clone()));
+            }
+
+            // If we have an event, push it, using the new path (renames will be actioned first by
+            // the caller)
+            if let Some(event) = event {
+                match event {
+                    Event::Delete(_) => deletions.push(new_path),
+                    Event::Create(_) => {
+                        if let Some(patch_fut) = PathPatch::new(new_path) {
+                            creations_futs.push(patch_fut);
+                        }
                     }
-                }
-                Event::Modify(path) => {
-                    if let Some(patch_fut) = PathPatch::new(path) {
-                        modifications_futs.push(patch_fut);
+                    Event::Modify(_) => {
+                        if let Some(patch_fut) = PathPatch::new(new_path) {
+                            modifications_futs.push(patch_fut);
+                        }
                     }
+                    Event::Rename(_, _) => unreachable!(),
                 }
             }
         }

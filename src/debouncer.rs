@@ -1,11 +1,7 @@
-// TODO: Can this system handle rename, modify, rename? The second rename would never touch the
-// first...
-
 use std::collections::HashMap;
 use std::convert::identity;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-
 use walkdir::WalkDir;
 
 /// Some kind of filesystem update to a single path.
@@ -26,81 +22,75 @@ impl Event {
             Event::Rename(p, _) => p,
         }
     }
+    /// Updates the path on this event. For rename events, the old path will be changed and the new
+    /// path left unaltered.
+    fn with_path(self, p: PathBuf) -> Self {
+        match self {
+            Event::Create(_) => Event::Create(p),
+            Event::Delete(_) => Event::Delete(p),
+            Event::Modify(_) => Event::Modify(p),
+            Event::Rename(_, to) => Event::Rename(p, to),
+        }
+    }
 }
 
 /// Debounces two events, which are assumed to act on the same path. This is where we define
 /// fundamental debouncing rules.
 ///
-/// Nearly all cases will produce a single event as output, though create-then-delete will of
-/// course produce none, and modify-then-rename (or vice versa) will produce two events.
+/// Apart from the case of creation then deletion, all combinations of two events will produce a
+/// single event.
 ///
-/// This performs modifications in-place for the caller's convenience.
-fn debounce_two(x: usize, y: usize, events: &mut Vec<Option<Event>>) {
-    // Extract the two events, replacing them with `None`s, and determine what they should become
-    let event_1 = std::mem::take(&mut events[x]);
-    let event_2 = std::mem::take(&mut events[y]);
-    let (new_1, new_2) = match (event_1, event_2) {
-        (None, None) => (None, None),
-        (None, Some(e)) => (None, Some(e)),
-        (Some(e), None) => (None, Some(e)),
-        (Some(e1), Some(e2)) => match (e1, e2) {
+/// This also takes the last path the events apply to, extracted from a traversal of all renames.
+/// This avoids cumbersome rename combination and allows renames to be instantly handled. Neither
+/// of the provided events should be renames.
+fn debounce_two(event_1: Option<Event>, event_2: Event, curr_path: PathBuf) -> Option<Event> {
+    match (&event_1, &event_2) {
+        (None, _) => Some(event_2),
+        (Some(event_1), event_2) => match (event_1, event_2) {
             // Create-then-delete is nothing
-            (Event::Create(_), Event::Delete(_)) => (None, None),
+            (Event::Create(_), Event::Delete(_)) => None,
             // Create-then-modify is just a create (we haven't observed the pre-modification state)
-            (Event::Create(_), Event::Modify(p)) => (None, Some(Event::Create(p))),
-            // Create-then-rename == create at new path
-            (Event::Create(_), Event::Rename(_, new)) => (None, Some(Event::Create(new))),
+            (Event::Create(_), Event::Modify(_)) => Some(Event::Create(curr_path)),
             // Double create is just create
-            (Event::Create(_), Event::Create(p)) => (None, Some(Event::Create(p))),
+            (Event::Create(_), Event::Create(_)) => Some(Event::Create(curr_path)),
+            (Event::Create(_), Event::Rename(_, _)) => unreachable!(),
 
             // Delete-then-create is a modification
-            (Event::Delete(_), Event::Create(p)) => (None, Some(Event::Modify(p))),
+            (Event::Delete(_), Event::Create(_)) => Some(Event::Modify(curr_path)),
             // Delete-then-modify shouldn't be possible, but it would basically be a modification
-            (Event::Delete(_), Event::Modify(p)) => (None, Some(Event::Modify(p))),
-            // Delete-then-rename shouldn't be possible, but it would basically be a rename
-            (Event::Delete(_), Event::Rename(old, new)) => (None, Some(Event::Rename(old, new))),
+            (Event::Delete(_), Event::Modify(_)) => Some(Event::Modify(curr_path)),
             // Double delete is just delete
-            (Event::Delete(_), Event::Delete(p)) => (None, Some(Event::Delete(p))),
+            (Event::Delete(_), Event::Delete(_)) => Some(Event::Delete(curr_path)),
+            (Event::Delete(_), Event::Rename(_, _)) => unreachable!(),
 
             // Modify-then-create shouldn't be possible, but it would basically be a modification
-            (Event::Modify(_), Event::Create(p)) => (None, Some(Event::Modify(p))),
+            (Event::Modify(_), Event::Create(_)) => Some(Event::Modify(curr_path)),
             // Modify-then-delete is just a deletion
-            (Event::Modify(_), Event::Delete(p)) => (None, Some(Event::Delete(p))),
-            // Modify-then-rename shuld have the rename hoisted to the front. This will only occur
-            // for a path with no creation event (i.e. one already tracked), which means renames
-            // will be reliably hoisted to the top of the event list.
-            (Event::Modify(_), Event::Rename(old, new)) => (
-                Some(Event::Rename(old, new.clone())),
-                Some(Event::Modify(new)),
-            ),
+            (Event::Modify(_), Event::Delete(_)) => Some(Event::Delete(curr_path)),
             // Double modify is just one modify
-            (Event::Modify(_), Event::Modify(p)) => (None, Some(Event::Modify(p))),
+            (Event::Modify(_), Event::Modify(_)) => Some(Event::Modify(curr_path)),
+            (Event::Modify(_), Event::Rename(_, _)) => unreachable!(),
 
-            // NOTE: Paths of the second events here will be the `new` path from the rename
-            //
-            // Rename-then-create shouldn't be possible, but it would just be a rename
-            (Event::Rename(old, new), Event::Create(_)) => (None, Some(Event::Rename(old, new))),
-            // Rename-then-delete is a deletion of the old path
-            (Event::Rename(old, _), Event::Delete(_)) => (None, Some(Event::Delete(old))),
-            // Rename-then-modify is exactly the sequence we want (as for modify-then-rename, this
-            // can only happen for already-tracked paths)
-            (Event::Rename(old, new), Event::Modify(new_m)) => {
-                (Some(Event::Rename(old, new)), Some(Event::Modify(new_m)))
-            }
-            // Double rename is a rename across the two paths
-            (Event::Rename(old, _), Event::Rename(_, new)) => (None, Some(Event::Rename(old, new))),
+            (Event::Rename(_, _), _) => unreachable!(),
         },
-    };
-    events[x] = new_1;
-    events[y] = new_2;
+    }
 }
 
-/// A series of debounced filesystem events, organised as a map from paths to the events which
-/// have occurred on them. Generally, only the values in this map will be used.
+/// A series of debounced filesystem events, organised as a map from new paths to their old paths
+/// and the single event that has occurred on that path.
 ///
-/// Note that, for renamed paths, the final path will be used as the key in the map.
+/// For paths which have not been renamed, the old path in the value will be `None`; for those
+/// which have been renamed, the path in the key will be the new path and the path in the value
+/// will be the old path.
+///
+/// The event inside the value of each entry would be `None` if the only thing that happened to the
+/// path in question was a rename.
 pub struct DebouncedEvents {
-    inner: HashMap<PathBuf, Vec<Event>>,
+    /// A map from *new* paths (after every rename) to the old path (if there was a rename) and all
+    /// the events which have occurred on that path. Outside of [`Self::extend_from_sequential`],
+    /// there will only ever be zero or one event per path. But, for accumulating, we need to be
+    /// able to add many.
+    inner: HashMap<PathBuf, (Option<PathBuf>, Vec<Event>)>,
 }
 impl DebouncedEvents {
     /// Creates a new instance of [`DebouncedEvents`], with no events yet.
@@ -125,7 +115,7 @@ impl DebouncedEvents {
                 .map(|entry| {
                     (
                         entry.path().to_path_buf(),
-                        vec![Event::Create(entry.path().to_path_buf())],
+                        (None, vec![Event::Create(entry.path().to_path_buf())]),
                     )
                 })
                 .collect(),
@@ -138,58 +128,55 @@ impl DebouncedEvents {
     /// will be treated as such (i.e. operations on files that have been renamed, using the old
     /// path, will be considered operations on different files).
     pub fn extend_from_sequential(&mut self, events: Vec<Event>) {
-        // First, collate events for each path, resolving renames automatically as we go
+        // First, collate events for each path into a map following the same structure as the final
+        // one, but using a list of events instead of just one
         for event in events {
-            // We'll put this event with other events operating on the same file unless it's a
-            // rename, in which case we'll move all the events that happened on `from` to a new
-            // place for `to` (any subsequent ones on `from` are acting on a different file)
-            let operative_path = if let Event::Rename(ref from, ref to) = event {
-                let file_events = self.inner.remove(from).unwrap_or_default();
-                self.inner.insert(to.to_path_buf(), file_events);
-                to.to_path_buf()
-            } else {
-                event.path().to_path_buf()
-            };
-            self.inner
-                .entry(operative_path.to_path_buf())
-                .and_modify(|events| events.push(event.clone()))
-                .or_insert(vec![event]);
-        }
-
-        for events in self.inner.values_mut() {
-            // Debounce the events on this file in a window of twos (if there's only one, leave it
-            // be). For new paths, this will coalesce all events into a creation, and for existing
-            // paths, this will coalesce all events into a possible rename and then a
-            // modification/deletion. Either way, renames will be hoisted to the top automatically.
-            if events.len() >= 2 {
-                let events_tmp = std::mem::take(events);
-                // Wrap every event in `Some(_)`, we're about to `None`ify a few of them!
-                let mut events_tmp = events_tmp.into_iter().map(|e| Some(e)).collect::<Vec<_>>();
-                for i in 1..events_tmp.len() {
-                    // This handles all edge cases automatically
-                    debounce_two(i - 1, i, &mut events_tmp);
+            if let Event::Rename(from, to) = event {
+                if let Some((oldest_path, existing_events)) = self.inner.remove(&from) {
+                    // We'll insert back under the new path, using the previous path as the old
+                    // path if there haven't been any prior renames, or the `from` path from the
+                    // earliest of them if there have been (ensuring the original path can be
+                    // found). This essentially condenses all renames into one.
+                    self.inner
+                        .insert(to, (Some(oldest_path.unwrap_or(from)), existing_events));
+                } else {
+                    // This is a rename of a path we haven't seen any other events for
+                    self.inner.insert(to, (Some(from), Vec::new()));
                 }
-                *events = events_tmp.into_iter().filter_map(identity).collect()
+            } else {
+                self.inner
+                    .entry(event.path().to_path_buf())
+                    .and_modify(|(_, events)| events.push(event.clone()))
+                    .or_insert((None, vec![event]));
             }
         }
+
+        // Now go through and debounce all those
+        for (new_path, (_, sequential_events)) in self.inner.iter_mut() {
+            *sequential_events = sequential_events
+                .drain(..)
+                .fold(None, |acc, ev| debounce_two(acc, ev, new_path.clone()))
+                // Convert an `Option<T>` into a `Vec<T>`
+                .map(|ev| vec![ev])
+                .unwrap_or_default();
+        }
     }
-    /// Consumes this instance of [`DebouncedEvents`], returning all the events on every file.
-    pub fn into_vec(self) -> Vec<Event> {
+    /// Consumes this set of [`DebouncedEvents`], returning a series of entries of new paths, old
+    /// paths, and an event that might have occurred there.
+    pub fn into_iter(self) -> impl Iterator<Item = (PathBuf, Option<PathBuf>, Option<Event>)> {
         self.inner
             .into_iter()
-            .flat_map(|(_, events)| events)
-            .collect()
-    }
-}
-impl Deref for DebouncedEvents {
-    type Target = HashMap<PathBuf, Vec<Event>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-impl DerefMut for DebouncedEvents {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+            .map(|(new_path, (old_path, mut events))| {
+                // There will only ever be one event or none
+                let event = if events.is_empty() {
+                    None
+                } else if events.len() == 1 {
+                    // `.pop()` goes from the back, but we've only got one
+                    Some(events.pop().unwrap())
+                } else {
+                    unreachable!()
+                };
+                (new_path, old_path, event)
+            })
     }
 }

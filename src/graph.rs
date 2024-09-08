@@ -218,7 +218,8 @@ impl Graph {
         let mut nodes = self.nodes.write().await;
         let mut paths = self.paths.write().await;
         for (from, to) in renames {
-            // If we can't find the original path, we'll leave this
+            // If we can't find the original path, we'll leave this (this is a valid case, see
+            // `patch.rs`)
             if let Some(path_node) = paths.remove(&from) {
                 // We hold the only reference, reading is guaranteed
                 let path_node_ref = path_node.try_read().unwrap();
@@ -229,11 +230,6 @@ impl Graph {
                 drop(path_node_ref);
 
                 paths.insert(to, path_node);
-            } else {
-                debug_assert!(
-                    false,
-                    "found rename instruction for path that wasn't in the graph"
-                );
             }
         }
     }
