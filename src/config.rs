@@ -1,7 +1,7 @@
 use crate::error::ConfigParseError;
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{path::Path, sync::atomic::AtomicBool};
 
 /// The global configutation for a Starling instance. This starts as uninstantiated.
 pub static STARLING_CONFIG: GlobalConfig = GlobalConfig::new();
@@ -19,6 +19,10 @@ pub struct GlobalConfig {
     /// This uses `parking_lot`'s `RwLock` to avoid writer starvation (quite important here!) and
     /// to keep things synchronous (this is used literally everywhere).
     config: RwLock<Option<Config>>,
+    /// This is used in testing to make sure we don't double-configure, which can lead to
+    /// deadlocks.
+    #[cfg(test)]
+    pub setup: AtomicBool,
 }
 impl GlobalConfig {
     /// Creates an uninstantiated global configuration. This *must* be instantiated before being
@@ -26,6 +30,8 @@ impl GlobalConfig {
     pub const fn new() -> Self {
         Self {
             config: RwLock::new(None),
+            #[cfg(test)]
+            setup: AtomicBool::new(false),
         }
     }
     /// Gets the current state of the global configuration.
@@ -38,6 +44,8 @@ impl GlobalConfig {
     }
     /// Writes the given configuration to all parts of Starling.
     pub fn set(&self, new_config: Config) {
+        #[cfg(test)]
+        self.setup.store(true, std::sync::atomic::Ordering::SeqCst);
         *self.config.write() = Some(new_config);
     }
 }
