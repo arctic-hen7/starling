@@ -624,19 +624,10 @@ impl ConnectedNode {
     //         title_connections.chain(body_connections)
     //     })
     // }
-    // /// Gets an iterator of all the connections in this node's entire tree, with the ID of the node
-    // /// in the tree from which each one came.
-    // pub fn connections(&self) -> impl Iterator<Item = (&Uuid, &Connection)> {
-    //     self.map.iter().flat_map(|(id, node)| {
-    //         let title_connections = node.title.connections().map(move |conn| (id, conn));
-    //         let body_connections = node
-    //             .body
-    //             .as_ref()
-    //             .into_iter()
-    //             .flat_map(move |body| body.connections().map(move |conn| (id, conn)));
-    //         title_connections.chain(body_connections)
-    //     })
-    // }
+    /// Gets an iterator of all the connections in this node's entire tree.
+    pub fn connections(&self) -> impl Iterator<Item = ConnectionRef<'_>> {
+        self.map.values().flat_map(|node| node.connections())
+    }
     // /// Gets an iterator of mutable references to all the connections in this node's entire tree,
     // /// with the ID of the node in the tree from which each one came.
     // pub fn connections_mut(&mut self) -> impl Iterator<Item = (&Uuid, &mut Connection)> {

@@ -1,3 +1,4 @@
+use crate::error::PathParseError;
 use crate::{debouncer::DebouncedEvents, patch::GraphPatch, path_node::PathNode};
 use futures::future::join;
 use futures::future::join_all;
@@ -100,6 +101,27 @@ impl Graph {
             paths: RwLock::new(HashMap::new()),
             invalid_connections: RwLock::new(HashMap::new()),
         }
+    }
+    /// Returns any errors associated with the given path. The return type here is a little
+    /// strange: if the path couldn't be parsed, you'll get an `Err(PathParseError)` (stringified),
+    /// but if it could be, you'll get an `Ok(_)` with a list of the IDs of all invalid connections
+    /// made in the path. If the path doesn't exist at all, you'll get `None`.
+    pub async fn errors(&self, path: &Path) -> Option<Result<Vec<Uuid>, String>> {
+        let paths = self.paths.read().await;
+        let path_node = paths.get(path)?.read().await;
+        Some(
+            path_node
+                .document()
+                .map(|doc| {
+                    doc.root
+                        .connections()
+                        .filter(|conn| !conn.is_valid())
+                        .map(|conn| conn.id())
+                        .collect()
+                })
+                // If there's no document, an error is guaranteed
+                .ok_or_else(|| path_node.error.as_ref().unwrap().to_string()),
+        )
     }
     /// Creates a new graph, tracking all files in the given directory recursively. This will read
     /// every file that can be parsed and parse them all.
@@ -503,7 +525,7 @@ impl Graph {
                             invalid_connections
                                 .as_mut()
                                 .unwrap()
-                                .entry(from)
+                                .entry(to)
                                 .or_insert_with(|| HashSet::new())
                                 .insert(from);
                         }

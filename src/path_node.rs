@@ -23,7 +23,7 @@ pub struct PathNode {
     /// An error that might have occurred while parsing this path. If this is present along with a
     /// `document`, the document will be the last successfully parsed version of the document, and
     /// this will be the latest error occurred on subsequent attempts to parse the document.
-    error: Option<PathParseError>,
+    pub error: Option<PathParseError>,
 }
 
 impl PathNode {
