@@ -146,6 +146,7 @@ async fn should_parse_connections_and_node_data() {
         })
         .await
         .into_iter()
+        .map(|w| (w.path, w.contents))
         .collect();
     // File 1 should have some titles rewritten and link qualified
     assert_eq!(
@@ -513,6 +514,7 @@ This is a connection to [File 3](link:6097edb8-7a66-45fe-aec3-eb957f511ab2)."#;
         })
         .await
         .into_iter()
+        .map(|w| (w.path, w.contents))
         .collect::<HashMap<_, _>>();
     // All should be written back to disk on creation to preserve any potentially missing IDs
     assert!(writes.contains_key(&PathBuf::from("file_1.md")));
@@ -532,6 +534,7 @@ This is a connection to [File 3](link:6097edb8-7a66-45fe-aec3-eb957f511ab2)."#;
         })
         .await
         .into_iter()
+        .map(|w| (w.path, w.contents))
         .collect::<HashMap<_, _>>();
 
     // We should rewrite the dependent files to update the title, but file 2 itself shouldn't need
@@ -563,6 +566,7 @@ This is a connection to [File 3](link:6097edb8-7a66-45fe-aec3-eb957f511ab2)."#;
         })
         .await
         .into_iter()
+        .map(|w| (w.path, w.contents))
         .collect::<HashMap<_, _>>();
     assert_eq!(
         writes.get(&PathBuf::from("file_1.md")).unwrap(),
@@ -1046,6 +1050,7 @@ This is a test file. Here's [File 2](link:7097edb8-7a66-45fe-aec3-eb957f511ab2)"
         })
         .await
         .into_iter()
+        .map(|w| (w.path, w.contents))
         .collect::<HashMap<_, _>>();
     // New node and the backlink should be updated, so both files should be written to
     assert_eq!(
@@ -1240,6 +1245,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1). And here's [some fil
         })
         .await
         .into_iter()
+        .map(|w| (w.path, w.contents))
         .collect::<HashMap<_, _>>();
     // We've changed connections in file 2, but only removed one in file 1
     assert!(!writes.contains_key(&PathBuf::from("file_1.md")));

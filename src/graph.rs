@@ -1,3 +1,4 @@
+use crate::conflict_detector::{Conflict, Write, WriteSource};
 use crate::error::PathParseError;
 use crate::{debouncer::DebouncedEvents, patch::GraphPatch, path_node::PathNode};
 use futures::future::join;
@@ -141,6 +142,19 @@ impl Graph {
 
         this
     }
+    /// Rescans the given directory, completely reconstructing the graph from it, from scratch.
+    /// This will take considerably longer than processing atomic file events, and should only be
+    /// done if absolutely necessary.
+    pub async fn rescan(&mut self, dir: PathBuf) {
+        let mut nodes = self.nodes.write().await;
+        let mut paths = self.paths.write().await;
+        let mut invalid_connections = self.invalid_connections.write().await;
+
+        let new_graph = Self::from_dir(dir).await;
+        *nodes = new_graph.nodes.into_inner();
+        *paths = new_graph.paths.into_inner();
+        *invalid_connections = new_graph.invalid_connections.into_inner();
+    }
     /// Process a batch of updates from the filesystem. This operates as the start of a pipeline,
     /// generating modifications which in turn generate instructions for locking and graph updates.
     /// This will acquire read locks on the paths map and some individual paths as necessary to
@@ -149,11 +163,9 @@ impl Graph {
     ///
     /// Like [`Self::process_updates`], this will return a list of paths and the contents that
     /// should be written to them.
-    pub async fn process_fs_patch(&self, patch: GraphPatch) -> Vec<(PathBuf, String)> {
+    pub async fn process_fs_patch(&self, patch: GraphPatch) -> Vec<Write> {
         // Start with renames (they have to be fully executed before anything else so the right
         // paths are in the map for everything else)
-        // TODO: If we can make renames happen at the *end* rather than the start, these could be
-        // processed like everything else...
         self.process_renames(patch.renames).await;
 
         // Creations, deletions, and modifications need read guards, and so can all be done
@@ -170,6 +182,8 @@ impl Graph {
         let paths = self.paths.read().await;
         let mut deletion_futs = Vec::new();
         for path in patch.deletions {
+            // We by definition can't do anything with a bad deletion, so ignore it if we can't
+            // find the path it's talking about
             if let Some(path_node) = paths.get(&path) {
                 deletion_futs.push(async {
                     let path_node = path_node.read().await;
@@ -179,6 +193,7 @@ impl Graph {
         }
         let mut modification_futs = Vec::new();
         for path_patch in patch.modifications {
+            // If we can't find the path a modification is talking about, treat it as a creation
             if let Some(path_node) = paths.get(&path_patch.path) {
                 modification_futs.push(async {
                     let path_node = path_node.read().await;
@@ -192,10 +207,18 @@ impl Graph {
 
                     updates_l
                 });
+            } else {
+                // TODO: Would like to log here to know if this ever happens...
+                let (path_node, mut updates_l) =
+                    PathNode::new(path_patch.path, path_patch.contents_res);
+                updates_l.push(GraphUpdate::CreatePathNode(path_node));
+                updates.push(updates_l);
             }
         }
 
         // These are both `Vec<Vec<GraphUpdate>>`
+        // TODO: If we get deadlocks, we may need to sort these by path so they read in a fixed
+        // order
         let (deletion_updates, modification_updates) =
             join(join_all(deletion_futs), join_all(modification_futs)).await;
         updates.extend(deletion_updates);
@@ -238,10 +261,7 @@ impl Graph {
     /// written to them.
     ///
     /// *Hint: if there's a deadlock, it's probably happening in here!*
-    async fn process_updates(
-        &self,
-        updates: impl Iterator<Item = GraphUpdate>,
-    ) -> Vec<(PathBuf, String)> {
+    async fn process_updates(&self, updates: impl Iterator<Item = GraphUpdate>) -> Vec<Write> {
         let mut should_lock_nodes = false;
         let mut should_lock_paths = false;
         let mut should_lock_invalid_connections = false;
@@ -545,13 +565,16 @@ impl Graph {
                 } else {
                     Format::Markdown
                 };
-                Some((
+                Some(Write {
                     path,
-                    path_node
+                    contents: path_node
                         .document()?
                         .to_document(format)
                         .into_string(format),
-                ))
+                    source: WriteSource::Filesystem,
+                    // This will be worked out by the conflict detector later
+                    conflict: Conflict::None,
+                })
             })
             .collect()
     }

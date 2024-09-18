@@ -16,7 +16,7 @@ pub struct GraphPatch {
     /// **Important:** these may not necessarily exist. If a path is created and then deleted, and
     /// renamed in between, this will still record that rename! Similarly, if a path is created,
     /// and then renamed, the creation event returned will be on the new path, but the rename will
-    /// still exist!
+    /// still exist! In the former case, a deletion will be recorded on the path for clarity.
     ///
     /// As with a set of [`DebouncedEvents`], these must be processed first.
     pub renames: Vec<(PathBuf, PathBuf)>,
@@ -90,10 +90,10 @@ impl PathPatch {
     /// files.
     ///
     /// This will return [`None`] if the path doesn't need a patch constructed from it (i.e. if it
-    /// isn't one of the types of files we track).
+    /// isn't one of the types of files we track, or if it isn't a file at all).
     pub fn new(path: PathBuf) -> Option<impl Future<Output = PathPatch>> {
         let ext = path.extension().unwrap_or_default();
-        if ext == "org" || ext == "md" || ext == "markdown" {
+        if (ext == "org" || ext == "md" || ext == "markdown") && path.is_file() {
             Some(async move {
                 // Read the contents
                 let contents_res = tokio::fs::read_to_string(&path).await;

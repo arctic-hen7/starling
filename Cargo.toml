@@ -4,14 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-dashmap = "6.0.1"
+crossbeam-queue = "0.3.11"
 futures = "0.3.30"
+# This makes `notify` play well with `tokio`
+notify = { version = "6.1.1", default-features = false, features = [ "macos_fsevent" ] }
 orgish = { version = "0.1", path = "../../orgish/orgish/packages/orgish", features = [ "serde" ] }
 parking_lot = "0.12.3"
 serde = { version = "1.0.208", features = ["derive"] }
 serde_yaml = "0.9.34"
 thiserror = "1"
-tokio = { version = "1", features = [ "macros", "rt", "rt-multi-thread", "fs", "sync" ] }
+tokio = { version = "1", features = [ "macros", "rt", "rt-multi-thread", "fs", "sync", "time" ] }
 toml = "0.8.19"
 uuid = { version = "1.10.0", features = ["v4", "serde"] }
 walkdir = "2.5.0"
