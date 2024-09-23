@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 crossbeam-queue = "0.3.11"
+directories = "5.0.1"
 futures = "0.3.30"
 # This makes `notify` play well with `tokio`
 notify = { version = "6.1.1", default-features = false, features = [ "macos_fsevent" ] }
@@ -15,6 +16,9 @@ serde_yaml = "0.9.34"
 thiserror = "1"
 tokio = { version = "1", features = [ "macros", "rt", "rt-multi-thread", "fs", "sync", "time" ] }
 toml = "0.8.19"
+tracing = "0.1.40"
+tracing-appender = "0.2.3"
+tracing-subscriber = "0.3.18"
 uuid = { version = "1.10.0", features = ["v4", "serde"] }
 walkdir = "2.5.0"
 

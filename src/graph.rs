@@ -1,5 +1,4 @@
 use crate::conflict_detector::{Conflict, Write, WriteSource};
-use crate::error::PathParseError;
 use crate::{debouncer::DebouncedEvents, patch::GraphPatch, path_node::PathNode};
 use futures::future::join;
 use futures::future::join_all;
@@ -130,7 +129,7 @@ impl Graph {
     /// # Panics
     ///
     /// This will panic if the provided path is not a valid directory.
-    pub async fn from_dir(dir: PathBuf) -> Self {
+    pub async fn from_dir(dir: &Path) -> Self {
         assert!(dir.is_dir());
 
         // Fake creation events recursively for everything in the directory
@@ -145,12 +144,12 @@ impl Graph {
     /// Rescans the given directory, completely reconstructing the graph from it, from scratch.
     /// This will take considerably longer than processing atomic file events, and should only be
     /// done if absolutely necessary.
-    pub async fn rescan(&mut self, dir: PathBuf) {
+    pub async fn rescan(&mut self, dir: &Path) {
         let mut nodes = self.nodes.write().await;
         let mut paths = self.paths.write().await;
         let mut invalid_connections = self.invalid_connections.write().await;
 
-        let new_graph = Self::from_dir(dir).await;
+        let new_graph = Self::from_dir(&dir).await;
         *nodes = new_graph.nodes.into_inner();
         *paths = new_graph.paths.into_inner();
         *invalid_connections = new_graph.invalid_connections.into_inner();

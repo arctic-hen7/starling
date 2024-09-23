@@ -1,7 +1,10 @@
 use crate::error::ConfigParseError;
+use directories::ProjectDirs;
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::atomic::AtomicBool};
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 /// The global configutation for a Starling instance. This starts as uninstantiated.
 pub static STARLING_CONFIG: GlobalConfig = GlobalConfig::new();
@@ -59,6 +62,10 @@ static TEST_PATHS: [&str; 4] = [
     "config.toml",
     ".config.toml",
 ];
+// TODO: Optimal value here?
+fn default_debounce_duration() -> u64 {
+    300
+}
 
 /// The user's configuration of Starling. This is instantiated at the very start as a global
 /// variable, and is used to manage many components of the overall system.
@@ -79,8 +86,18 @@ pub struct Config {
     /// The default type of link. This *must* be contained in `link_types`.
     pub default_link_type: String,
     /// All the tags that vertices are allowed to have. This global listing prevents typos.
-    // TODO: Regex support?
     pub tags: Vec<String>,
+    /// A number of milliseconds to debounce events over. Essentially, updates from the filesystem
+    /// need to be watched by Starling to reload the in-memory representation, but sometimes
+    /// they'll come very rapidly, so we'll wait until there are no events for this long, and then
+    /// we'll process them all in a batch. Very short values may lead to poor performance, and very
+    /// long values may lead to poor responsiveness.
+    #[serde(default = "default_debounce_duration")]
+    pub debounce_duration: u64,
+    /// The directory to write rolling daily log files to. Because retrieving the default for this
+    /// can fail, this will start as `None` in the default and be set to the default log directory
+    /// when instantiated properly.
+    pub log_directory: Option<PathBuf>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -89,6 +106,8 @@ impl Default for Config {
             link_types: vec!["link".to_string()],
             default_link_type: "link".to_string(),
             tags: Vec::new(),
+            debounce_duration: default_debounce_duration(),
+            log_directory: None,
         }
     }
 }
@@ -142,6 +161,36 @@ impl Config {
             if !config.link_types.contains(&config.default_link_type) {
                 config.link_types.push(config.default_link_type.clone());
             }
+
+            // Validate the logging directory, or set one up if a custom one wasn't provided
+            if let Some(log_dir) = &config.log_directory {
+                if !log_dir.is_dir() {
+                    return Err(ConfigParseError::InvalidLogDir {
+                        path: log_dir.clone(),
+                    });
+                }
+            } else {
+                // We need to set up a default logging directory in a reasonable place
+                if let Some(proj_dirs) = ProjectDirs::from("org", "starling", "starling") {
+                    let log_dir = proj_dirs.data_dir().join("logs");
+                    if !log_dir.exists() {
+                        // Not async, but that's okay for a simple setup
+                        std::fs::create_dir_all(&log_dir).map_err(|err| {
+                            ConfigParseError::CreateDefaultLogDirFailed {
+                                path: log_dir.clone(),
+                                err,
+                            }
+                        })?;
+                    }
+
+                    // We don't have logging yet, but the user should know where logs are going
+                    println!("Logging to: {log_dir:#?}");
+                    config.log_directory = Some(log_dir);
+                } else {
+                    return Err(ConfigParseError::NoProjectDirs);
+                }
+            }
+            // By now, `self.log_directory` is guaranteed to be `Some(valid_dir)`
 
             Ok(config)
         } else {

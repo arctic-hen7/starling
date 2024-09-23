@@ -1,4 +1,5 @@
 use crate::{
+    config::STARLING_CONFIG,
     conflict_detector::{Conflict, ConflictDetector, Write},
     debouncer::{DebouncedEvents, Event},
     graph::Graph,
@@ -10,8 +11,14 @@ use notify::{
     event::{CreateKind, ModifyKind},
     EventKind as NotifyEvent, RecursiveMode, Watcher,
 };
-use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{select, sync::mpsc};
+use tracing::{error, warn};
 
 /// The engine that powers Starling's filesystem interactions. This is responsible for monitoring
 /// and debouncing filesystem changes, developing them into patches, and actioning them within the
@@ -36,10 +43,10 @@ pub struct FsEngine {
 impl FsEngine {
     /// Create a new filesystem engine to handle the given graph, which should already have been
     /// instantiated.
-    pub fn new(graph: Arc<Graph>, debounce_duration: u64) -> Self {
+    pub fn new(graph: Arc<Graph>) -> Self {
         Self {
             graph,
-            debounce_duration,
+            debounce_duration: STARLING_CONFIG.get().debounce_duration,
             conflict_detector: ConflictDetector::new(),
             writes_queue: Arc::new(SegQueue::new()),
         }
@@ -49,10 +56,7 @@ impl FsEngine {
     /// task.
     ///
     /// This takes the same directory as the graph started on.
-    pub fn run(
-        mut self,
-        dir: &Path,
-    ) -> Result<impl Future<Output = ()> + Send + '_, notify::Error> {
+    pub fn run(mut self, dir: PathBuf) -> Result<impl Future<Output = ()> + Send, notify::Error> {
         assert!(dir.is_dir());
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -216,8 +220,8 @@ impl FsEngine {
                                     // modification first, so a bit weird)
                                     match event {
                                         Event::Modify(_) => continue,
-                                        _ => eprintln!(
-                                            "[WARN]: Saw non-modification on self-write."
+                                        _ => warn!(
+                                            "saw non-modification on self-write"
                                         )
                                     }
                                 }
@@ -230,7 +234,7 @@ impl FsEngine {
                             // The file notifying thread has gone down, which shouldn't happen
                             // without our go-ahead, so this is a critical error and we should
                             // terminate
-                            eprintln!("[ERROR]: File notifier thread has gone down unexpectedly");
+                            error!("file notifier thread went down unexpectedly");
                             break;
                         }
                     },
