@@ -131,4 +131,35 @@ fn should_combine_correctly() {
     assert!(debounced.deletions.is_empty());
 }
 
+#[test]
+fn should_combine_rename_and_recreate_correctly() {
+    let events = vec![
+        Event::Rename(PathBuf::from("foo"), PathBuf::from("bar")),
+        Event::Create(PathBuf::from("foo")),
+    ];
+    let direct_debounced = DebouncedEvents::from_sequential(events.into_iter());
+
+    let mut debounced = DebouncedEvents::new();
+    debounced.combine(&direct_debounced);
+    assert_eq!(debounced, direct_debounced);
+}
+
+#[test]
+fn should_separate_rename_and_recreate() {
+    let events = vec![
+        Event::Rename(PathBuf::from("foo"), PathBuf::from("bar")),
+        Event::Create(PathBuf::from("foo")),
+    ];
+    let debounced =
+        DebouncedCategories::from_debounced(DebouncedEvents::from_sequential(events.into_iter()));
+
+    assert_eq!(debounced.creations, vec![PathBuf::from("foo")]);
+    assert_eq!(
+        debounced.renames,
+        vec![(PathBuf::from("foo"), PathBuf::from("bar"))]
+    );
+    assert!(debounced.modifications.is_empty());
+    assert!(debounced.deletions.is_empty());
+}
+
 // TODO: More tests

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// Some kind of filesystem update to a single path.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Event {
     Create(PathBuf),
     Delete(PathBuf),
@@ -86,7 +86,7 @@ fn debounce_two(event_1: Option<Event>, event_2: Event, curr_path: PathBuf) -> E
 ///
 /// The event inside the value of each entry would be `None` if the only thing that happened to the
 /// path in question was a rename.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DebouncedEvents {
     /// A map from *new* paths (after every rename) to the old path (if there was a rename) and an
     /// event that has occurred on that path, if there is one.
@@ -173,15 +173,24 @@ impl DebouncedEvents {
     /// Combines this set of [`DebouncedEvents`] with another, which is assumed to come after this
     /// one.
     pub fn combine(&mut self, other: &DebouncedEvents) {
+        // We apply renames first, and all other events later so we only rename things in the
+        // current set of debounced events, not in our own. If we saw a rename *after* a recreation
+        // event in `other`, for example, the rename would apply to it, corrupting that path. As
+        // such, we apply renames in the moment and store the rest for later.
+        let mut non_renames = Vec::with_capacity(other.inner.len());
         for (new_path, old_path, event) in other.iter() {
             if let Some(old_path) = old_path {
+                // We need to apply
                 self.push(Event::Rename(old_path.clone(), new_path.clone()));
             }
             if let Some(event) = event {
                 // The event will be registered on the new path, and if we needed to rename we just
                 // have
-                self.push(event.clone());
+                non_renames.push(event.clone());
             }
+        }
+        for ev in non_renames {
+            self.push(ev);
         }
     }
     /// Consumes this set of [`DebouncedEvents`], returning a series of entries of new paths, old

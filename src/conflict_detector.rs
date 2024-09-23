@@ -10,7 +10,8 @@ use std::path::PathBuf;
 /// This system does not perform conflict *resolution*, it merely warns of when there is a
 /// conflict.
 pub struct ConflictDetector {
-    /// A map of patch identifiers to information about the patches.
+    /// A map of patch identifiers to information about the patches. This will contain a
+    /// theoretical entry for the next patch (see [`PatchTableEntry`] for details).
     patch_table: HashMap<u32, PatchTableEntry>,
     /// The index of the next patch that will come through the system. All other entries in the
     /// patch table are actively processing. This will be used to link new updates to events that
@@ -22,8 +23,17 @@ pub struct ConflictDetector {
 impl ConflictDetector {
     /// Creates a new, empty [`ConflictDetector`].
     pub fn new() -> Self {
+        let mut patch_table = HashMap::new();
+        patch_table.insert(
+            0,
+            PatchTableEntry {
+                ref_count: 0, // Dummy
+                events_since: DebouncedEvents::new(),
+                other_writes: HashSet::new(),
+            },
+        );
         Self {
-            patch_table: HashMap::new(),
+            patch_table,
             next_patch: 0,
             next_ref_count: 0,
         }
@@ -32,6 +42,7 @@ impl ConflictDetector {
     /// later completes, it should pass the number this method returns with any writes to the
     /// filesystem it wants to perform so they can be parsed for conflicts.
     pub fn register_update(&mut self) -> u32 {
+        // We don't update the in-table reference count, because it's a dummy
         self.next_ref_count += 1;
         self.next_patch
     }
@@ -205,11 +216,16 @@ impl ConflictDetector {
             })
             .collect();
 
-        // Decrement the reference count, if it falls to zero, remove
-        let entry = self.patch_table.get_mut(&patch_idx).unwrap();
-        entry.ref_count -= 1;
-        if entry.ref_count <= 0 {
-            self.patch_table.remove(&patch_idx);
+        // Decrement the reference count, if it falls to zero, remove (but not for the theoretical
+        // patch, for that we should drop the separate reference count)
+        if patch_idx == self.next_patch {
+            self.next_ref_count -= 1;
+        } else {
+            let entry = self.patch_table.get_mut(&patch_idx).unwrap();
+            entry.ref_count -= 1;
+            if entry.ref_count <= 0 {
+                self.patch_table.remove(&patch_idx);
+            }
         }
 
         new_writes
@@ -223,21 +239,22 @@ impl ConflictDetector {
     /// having happened on all patches in the table.
     pub fn add_patch(&mut self, events: DebouncedEvents) -> u32 {
         // Update all patches (which are inherently previous to this one, which is "next") with the
-        // events that have occurred, which anything depending on them will want to know
+        // events that have occurred, which anything depending on them will want to know. We can
+        // use this to add the events in this new patch to its previously theoretical version in
+        // the table.
         self.patch_table.values_mut().for_each(|patch| {
             patch.events_since.combine(&events);
         });
-        // Only bother to create an entry in the table if we have some references to this new
-        // patch, otherwise there's no point (and we'd never remove it from the table anyway)
-        if self.next_ref_count > 0 {
-            self.patch_table.insert(
-                self.next_patch,
-                PatchTableEntry {
-                    ref_count: self.next_ref_count,
-                    events_since: events,
-                    other_writes: HashSet::new(),
-                },
-            );
+
+        // We already have an entry in the table, actively remove it if we have no references
+        // (otherwise we never would)
+        if self.next_ref_count <= 0 {
+            self.patch_table.remove(&self.next_patch);
+        } else {
+            self.patch_table
+                .get_mut(&self.next_patch)
+                .unwrap()
+                .ref_count = self.next_ref_count;
         }
 
         // We will have a reference to the next patch already (even if we haven't recorded our
@@ -245,11 +262,22 @@ impl ConflictDetector {
         self.next_ref_count = 1;
         self.next_patch += 1;
 
+        // Add an entry to the table for the new theoretical next patch
+        self.patch_table.insert(
+            self.next_patch,
+            PatchTableEntry {
+                ref_count: 0, // Dummy
+                events_since: DebouncedEvents::new(),
+                other_writes: HashSet::new(),
+            },
+        );
+
         self.next_patch
     }
 }
 
 /// The possibilities for a single path to be renamed.
+#[derive(Debug)]
 enum PathRename {
     /// The path has not been renamed.
     None,
@@ -257,7 +285,7 @@ enum PathRename {
     One(PathBuf),
     /// The path has been renamed, and the old path has been recreated and renamed again to
     /// something *different*. This is an irresolvable conflict.
-    Many(Vec<PathBuf>),
+    Many(HashSet<PathBuf>),
 }
 impl PathRename {
     /// Adds the given rename to this [`PathRename`].
@@ -265,8 +293,10 @@ impl PathRename {
         match self {
             Self::None => *self = Self::One(path),
             Self::One(curr) if *curr == path => {}
-            Self::One(curr) => *self = Self::Many(vec![curr.clone(), path]),
-            Self::Many(paths) => paths.push(path),
+            Self::One(curr) => *self = Self::Many([curr.clone(), path].into()),
+            Self::Many(paths) => {
+                paths.insert(path);
+            }
         }
     }
 }
@@ -276,26 +306,28 @@ struct PatchTableEntry {
     /// The number of "things" that depend on this patch (they will also depend on all patches
     /// after this, but that is not reflected in their reference counts). This will be decremented
     /// as things complete, and, once it falls to zero, this will be removed from the patch table.
-    ref_count: u32,
-    /// All events in this patch and those since it, debounced in one block.
-    events_since: DebouncedEvents,
-    /// Writes made from out-of-band updates that depended on this patch or an earlier one that was
-    /// still processing. Writes will only be added here while a patch is still processing so that,
-    /// when it finishes and we need to check for conflicts in the writes produced by the
-    /// filesystem processing, we can filter out any paths that it would have written to to just
-    /// update a link title, but which an out-of-band update wanted to make a change to, as that
-    /// update takes precedence.
     ///
-    /// The paths written to by the writes resulting from out-of-band updates that have occurred
-    /// since this patch. When such writes occur, they will be added to every patch in the patch
-    /// table to ensure that, when a patch finishes processing and tries to detect conflicts
-    /// between its own writes and the events that have occurred since it, it will see these writes
-    /// and drop any conflicts (as writes to update a link title must give way to those which have
-    /// performed a requested update).
+    /// For the next theoretical patch, this will always be zero until it becomes real.
+    ref_count: u32,
+    /// All events since this patch and those in it, debounced into one block.
+    events_since: DebouncedEvents,
+    /// Writes made from out-of-band updates to any path that occurred while this patch was in the
+    /// patch table. Because we store the next patch in the patch table, and that clearly hasn't
+    /// occurred yet, it's inaccurate to say these writes occur after the patch themselves. It *is*
+    /// correct to say that they occur *after the patch with the previous index*. The reason for
+    /// this quirk is because we use the same validation logic for out-of-band and filesystem
+    /// writes, and the latter are always checked against the next patch index (by definition).
+    /// This means we need to record out-of-band writes that could cause conflicts on the next
+    /// patch, hence why we must store the next theoretical patch.
+    ///
+    /// The reason out-of-band writes take precedence over filesystem writes is because the former
+    /// have been deliberately triggered, while the latter are purely corrective (e.g. fixing a
+    /// link title, which can be done at any time later).
     other_writes: HashSet<PathBuf>,
 }
 
 /// A write to the filesystem.
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Write {
     /// The path we want to write to.
     pub path: PathBuf,
@@ -307,6 +339,7 @@ pub struct Write {
     pub conflict: Conflict,
 }
 
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum WriteSource {
     /// This write came after processing a patch from the filesystem. These writes are entirely
     /// secondary, and only contain minor changes to things like link titles. If they conflict with
@@ -325,6 +358,7 @@ pub enum WriteSource {
 }
 
 /// Types of conflicts that can occur on a write.
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum Conflict {
     /// No conflict.
     None,
@@ -333,5 +367,5 @@ pub enum Conflict {
     Simple,
     /// This path was renamed to multiple other paths, and we don't know where to go. This is an
     /// irresolvable conflict.
-    Multi(Vec<PathBuf>),
+    Multi(HashSet<PathBuf>),
 }
