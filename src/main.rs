@@ -2,12 +2,9 @@ use config::{Config, STARLING_CONFIG};
 use error::Error;
 use fs_engine::FsEngine;
 use graph::Graph;
+use logging::setup_logging;
 use std::{path::PathBuf, sync::Arc};
-use tracing::{info, level_filters::LevelFilter};
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{
-    fmt::writer::MakeWriterExt, layer::SubscriberExt, util::SubscriberInitExt, Layer,
-};
+use tracing::info;
 
 mod config;
 mod conflict_detector;
@@ -16,6 +13,7 @@ mod debouncer;
 mod error;
 mod fs_engine;
 mod graph;
+mod logging;
 mod node;
 mod patch;
 mod path_node;
@@ -35,6 +33,7 @@ async fn main() {
 }
 
 async fn core() -> Result<(), Error> {
+    // The user will provide a directory as the first argument
     let dir = std::env::args()
         .nth(1)
         .map(PathBuf::from)
@@ -44,40 +43,11 @@ async fn core() -> Result<(), Error> {
         return Err(Error::InvalidDir { path: dir });
     }
 
-    // We need the config to know where to log
-    let config = Config::from_dir(&dir)?;
-    STARLING_CONFIG.set(config);
+    // Set up configuration and logging (we need config to know where to log)
+    STARLING_CONFIG.set(Config::from_dir(&dir)?);
+    setup_logging();
 
-    // Set up logging to create a rotating log file for each day
-    let file_appender = RollingFileAppender::new(
-        Rotation::DAILY,
-        STARLING_CONFIG.get().log_directory.as_ref().unwrap(),
-        "log",
-    );
-    // Create a subscriber that writes logs to the file
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    // Set the default subscriber to write logs to the non-blocking file appender
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_file(true)
-        .with_line_number(true)
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_level(true)
-        .with_writer(non_blocking);
-    // Stdout should only get above warnings
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_level(true)
-        .with_file(false)
-        .without_time()
-        .compact()
-        .with_writer(std::io::stdout)
-        .with_filter(LevelFilter::WARN);
-    tracing_subscriber::registry()
-        .with(stdout_layer)
-        .with(file_layer)
-        .init();
-
-    // Any errors on each path would be accumulated into each path
+    // Any errors on each path would be accumulated into each path, so this can't fail
     let (graph, initial_writes) = Graph::from_dir(&dir).await;
     let graph = Arc::new(graph);
 
