@@ -134,7 +134,7 @@ impl Graph {
         assert!(dir.is_dir());
 
         // Fake creation events recursively for everything in the directory
-        let creations = DebouncedEvents::start_from_dir(&dir);
+        let creations = DebouncedEvents::start_from_dir(dir);
         let patch = GraphPatch::from_events(creations).await;
 
         let this = Self::new();
@@ -150,7 +150,7 @@ impl Graph {
         let mut paths = self.paths.write().await;
         let mut invalid_connections = self.invalid_connections.write().await;
 
-        let (new_graph, writes) = Self::from_dir(&dir).await;
+        let (new_graph, writes) = Self::from_dir(dir).await;
         *nodes = new_graph.nodes.into_inner();
         *paths = new_graph.paths.into_inner();
         *invalid_connections = new_graph.invalid_connections.into_inner();
@@ -229,7 +229,7 @@ impl Graph {
         // This doesn't get automatically dropped, so we have to do it manually to avoid a deadlock
         drop(paths);
 
-        self.process_updates(updates.into_iter().map(|v| v.into_iter()).flatten())
+        self.process_updates(updates.into_iter().flat_map(|v| v.into_iter()))
             .await
     }
     /// Fully processes the given array of renames (where each tuple is a `from` and then `to`
@@ -544,7 +544,7 @@ impl Graph {
                                 .as_mut()
                                 .unwrap()
                                 .entry(to)
-                                .or_insert_with(|| HashSet::new())
+                                .or_insert_with(HashSet::new)
                                 .insert(from);
                         }
                     }

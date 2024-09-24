@@ -326,7 +326,7 @@ impl Graph {
                     .document()
                     .unwrap()
                     .root
-                    .node(&backlink_id)
+                    .node(backlink_id)
                     .unwrap();
 
                 backlinks.insert(
@@ -347,6 +347,7 @@ impl Graph {
             }
             // Now do the same for the children
             if options.child_connections {
+                #[allow(clippy::too_many_arguments)]
                 fn traverse(
                     node: &StarlingNode,
                     connected_root: &ConnectedNode,
@@ -408,7 +409,7 @@ impl Graph {
                                 .document()
                                 .unwrap()
                                 .root
-                                .node(&backlink_id)
+                                .node(backlink_id)
                                 .unwrap();
                             let types = node
                                 .connections_map()

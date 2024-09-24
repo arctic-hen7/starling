@@ -10,7 +10,7 @@ pub enum Error {
     #[error(transparent)]
     Config(#[from] ConfigParseError),
     #[error("failed to watch directory for changes")]
-    NotifyError(#[from] notify::Error),
+    Notify(#[from] notify::Error),
     #[error("please provide a directory for Starling to track")]
     NoDir,
     #[error("failed to bind listener on {host}:{port}")]
@@ -87,18 +87,4 @@ pub enum PathParseError {
     InvalidTag { path: PathBuf, tag: String },
     #[error("the unique id '{id}' appears more than once in {path:?}")]
     InternalDuplicateId { path: PathBuf, id: Uuid },
-}
-
-/// An error on a single path, which will be returned to the user.
-#[derive(Error, Debug)]
-pub enum PathError {
-    /// An error in parsing the path itself, represented as the serialized string of the error
-    /// message.
-    #[error("failed to parse path: {0}")]
-    ParseError(String),
-    /// An invalid connection in one of the vertices associated with this path. Often, duplicates
-    /// of these errors will appear, as a single child vertex with an invalid connection means its
-    /// parents will also have that error.
-    #[error("found connection to nonexistent vertex with id '{0}'")]
-    InvalidConnection(Uuid),
 }

@@ -11,12 +11,7 @@ use notify::{
     event::{CreateKind, ModifyKind},
     EventKind as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{select, sync::mpsc};
 use tracing::{error, warn};
 
@@ -153,7 +148,7 @@ impl FsEngine {
                                 tokio::spawn(async move {
                                     let writes = graph.process_fs_patch(patch).await;
                                     writes_queue.push((writes, patch_idx));
-                                })
+                                });
                             }));
                         }
 

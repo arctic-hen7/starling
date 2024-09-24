@@ -104,9 +104,12 @@ impl DebouncedEvents {
         }
     }
     /// Creates a new instance of [`DebouncedEvents`], with the given events, debounced.
+    #[cfg(test)]
     pub fn from_sequential(events: impl Iterator<Item = Event>) -> Self {
         let mut debounced = Self::new();
-        debounced.extend_from_sequential(events);
+        for event in events {
+            debounced.push(event);
+        }
         debounced
     }
     /// Creates a [`DebouncedEvents`] object of creation events from all the readable paths in a
@@ -123,17 +126,6 @@ impl DebouncedEvents {
                     )
                 })
                 .collect(),
-        }
-    }
-    /// Debounces a series of sequential updates into an organised set of debounced updates,
-    /// extending the existing set of debounced events.
-    ///
-    /// The new events are assumed to have come *after* those previously debounced, and renames
-    /// will be treated as such (i.e. operations on files that have been renamed, using the old
-    /// path, will be considered operations on different files).
-    pub fn extend_from_sequential(&mut self, events: impl Iterator<Item = Event>) {
-        for event in events {
-            self.push(event);
         }
     }
     /// Pushes a single event into this set of [`DebouncedEvents`], debouncing it.

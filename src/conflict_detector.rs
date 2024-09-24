@@ -223,7 +223,7 @@ impl ConflictDetector {
         } else {
             let entry = self.patch_table.get_mut(&patch_idx).unwrap();
             entry.ref_count -= 1;
-            if entry.ref_count <= 0 {
+            if entry.ref_count == 0 {
                 self.patch_table.remove(&patch_idx);
             }
         }
@@ -248,7 +248,7 @@ impl ConflictDetector {
 
         // We already have an entry in the table, actively remove it if we have no references
         // (otherwise we never would)
-        if self.next_ref_count <= 0 {
+        if self.next_ref_count == 0 {
             self.patch_table.remove(&self.next_patch);
         } else {
             self.patch_table

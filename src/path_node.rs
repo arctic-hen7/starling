@@ -255,12 +255,12 @@ impl PathNode {
                     let mut tags: Option<Vec<String>> = None;
                     for line in document.attributes.lines() {
                         if line.to_lowercase().starts_with("#+title: ") {
-                            title = Some(line.splitn(2, ": ").nth(1).unwrap());
+                            title = Some(line.split_once(": ").unwrap().1);
                         }
                         if line.to_lowercase().starts_with("#+tags: ")
                             || line.to_lowercase().starts_with("#+filetags: ")
                         {
-                            let tags_str = line.splitn(2, ": ").nth(1).unwrap();
+                            let tags_str = line.split_once(": ").unwrap().1;
                             // Tags can be delimited like `:hello:world:test:` or `hello world test`
                             // or `hello, world, test`. Helpfully, none of the delimiter characters are
                             // allowed within tags, so we can just split on all of them at once and go
