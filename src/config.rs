@@ -1,7 +1,7 @@
 use crate::error::ConfigParseError;
 use directories::ProjectDirs;
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -53,8 +53,6 @@ impl GlobalConfig {
     }
 }
 
-/// The "ordinary default" path which we'll write to if no config file has been defined yet.
-static DEFAULT_PATH: &str = "starling.toml";
 /// Default paths that can contain the configuration file.
 static TEST_PATHS: [&str; 4] = [
     "starling.toml",
@@ -62,7 +60,25 @@ static TEST_PATHS: [&str; 4] = [
     "config.toml",
     ".config.toml",
 ];
-// TODO: Optimal value here?
+// Serde defaults
+fn default_action_keywords() -> Vec<String> {
+    vec!["TODO".to_string(), "DONE".to_string()]
+}
+fn default_link_types() -> Vec<String> {
+    vec!["link".to_string()]
+}
+fn default_default_link_type() -> String {
+    "link".to_string()
+}
+fn default_tags() -> Vec<String> {
+    Vec::new()
+}
+fn default_host() -> String {
+    "localhost".to_string()
+}
+fn default_port() -> u16 {
+    3000
+}
 fn default_debounce_duration() -> u64 {
     300
 }
@@ -72,20 +88,24 @@ fn default_debounce_duration() -> u64 {
 ///
 /// Currently, any modifications to the config will require a full restart.
 // TODO: Automate that restart
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct Config {
     /// The keywords used on action item headings. Typically, these would be something like `TODO`,
     /// `DONE`, `START`, `WAIT`, etc. These determine the state of an action item, and are passed
     /// to API callers. Within Starling itself, no keyword has any particular meaning.
+    #[serde(default = "default_action_keywords")]
     pub action_keywords: Vec<String>,
     /// The types for links between vertices. These can be used to carry embedded metadata about
     /// the nature of a link from one vertex to another.
     ///
     /// None of these can be the empty string.
+    #[serde(default = "default_link_types")]
     pub link_types: Vec<String>,
     /// The default type of link. This *must* be contained in `link_types`.
+    #[serde(default = "default_default_link_type")]
     pub default_link_type: String,
     /// All the tags that vertices are allowed to have. This global listing prevents typos.
+    #[serde(default = "default_tags")]
     pub tags: Vec<String>,
     /// A number of milliseconds to debounce events over. Essentially, updates from the filesystem
     /// need to be watched by Starling to reload the in-memory representation, but sometimes
@@ -98,15 +118,24 @@ pub struct Config {
     /// can fail, this will start as `None` in the default and be set to the default log directory
     /// when instantiated properly.
     pub log_directory: Option<PathBuf>,
+    /// The host to serve the Starling server on.
+    #[serde(default = "default_host")]
+    pub host: String,
+    /// The port to serve the Starling server on.
+    #[serde(default = "default_port")]
+    pub port: u16,
 }
+
 impl Default for Config {
     fn default() -> Self {
         Self {
-            action_keywords: vec!["TODO".to_string(), "DONE".to_string()],
-            link_types: vec!["link".to_string()],
-            default_link_type: "link".to_string(),
-            tags: Vec::new(),
+            action_keywords: default_action_keywords(),
+            link_types: default_link_types(),
+            default_link_type: default_default_link_type(),
+            tags: default_tags(),
             debounce_duration: default_debounce_duration(),
+            host: default_host(),
+            port: default_port(),
             log_directory: None,
         }
     }
@@ -133,69 +162,66 @@ impl Config {
                     })?;
                 Ok(config)
             } else {
-                // Create a new configuration and write it to the default path
-                let config = Self::default();
-                let path = dir.join(DEFAULT_PATH);
-                std::fs::write(
-                    dir.join(DEFAULT_PATH),
-                    // If serializing the default fails, that's a programming error
-                    toml::to_string(&config)
-                        .expect("failed to serialize default configuration to string"),
-                )
-                .map_err(|err| ConfigParseError::WriteDefaultFailed {
-                    path: path.clone(),
-                    err,
-                })?;
-                Ok(config)
+                // Create a new configuration (don't bother writing it, that creates more trouble
+                // than it's worth and clutters the filesystem if we only want to use this
+                // directory once). This will be validated in a moment.
+                Ok(Self::default())
             }
         };
 
         // Validate the config
         if let Ok(mut config) = config_res {
-            if config.link_types.contains(&"".to_string()) {
-                return Err(ConfigParseError::EmptyLinkType);
-            }
-
-            // The default link type not being accounted for is a soft error, we can automatically
-            // correct it
-            if !config.link_types.contains(&config.default_link_type) {
-                config.link_types.push(config.default_link_type.clone());
-            }
-
-            // Validate the logging directory, or set one up if a custom one wasn't provided
-            if let Some(log_dir) = &config.log_directory {
-                if !log_dir.is_dir() {
-                    return Err(ConfigParseError::InvalidLogDir {
-                        path: log_dir.clone(),
-                    });
-                }
-            } else {
-                // We need to set up a default logging directory in a reasonable place
-                if let Some(proj_dirs) = ProjectDirs::from("org", "starling", "starling") {
-                    let log_dir = proj_dirs.data_dir().join("logs");
-                    if !log_dir.exists() {
-                        // Not async, but that's okay for a simple setup
-                        std::fs::create_dir_all(&log_dir).map_err(|err| {
-                            ConfigParseError::CreateDefaultLogDirFailed {
-                                path: log_dir.clone(),
-                                err,
-                            }
-                        })?;
-                    }
-
-                    // We don't have logging yet, but the user should know where logs are going
-                    println!("Logging to: {log_dir:#?}");
-                    config.log_directory = Some(log_dir);
-                } else {
-                    return Err(ConfigParseError::NoProjectDirs);
-                }
-            }
-            // By now, `self.log_directory` is guaranteed to be `Some(valid_dir)`
+            config.validate()?;
 
             Ok(config)
         } else {
             // This is an error
             config_res
         }
+    }
+    /// Validates this configuration, returning an error if it finds an invalid part. This will
+    /// also create expensive defaults if needed.
+    fn validate(&mut self) -> Result<(), ConfigParseError> {
+        if self.link_types.contains(&"".to_string()) {
+            return Err(ConfigParseError::EmptyLinkType);
+        }
+
+        // The default link type not being accounted for is a soft error, we can automatically
+        // correct it
+        if !self.link_types.contains(&self.default_link_type) {
+            self.link_types.push(self.default_link_type.clone());
+        }
+
+        // Validate the logging directory, or set one up if a custom one wasn't provided
+        if let Some(log_dir) = &self.log_directory {
+            if !log_dir.is_dir() {
+                return Err(ConfigParseError::InvalidLogDir {
+                    path: log_dir.clone(),
+                });
+            }
+        } else {
+            // We need to set up a default logging directory in a reasonable place
+            if let Some(proj_dirs) = ProjectDirs::from("org", "starling", "starling") {
+                let log_dir = proj_dirs.data_dir().join("logs");
+                if !log_dir.exists() {
+                    // Not async, but that's okay for a simple setup
+                    std::fs::create_dir_all(&log_dir).map_err(|err| {
+                        ConfigParseError::CreateDefaultLogDirFailed {
+                            path: log_dir.clone(),
+                            err,
+                        }
+                    })?;
+                }
+
+                // We don't have logging yet, but the user should know where logs are going
+                println!("Logging to: {log_dir:#?}");
+                self.log_directory = Some(log_dir);
+            } else {
+                return Err(ConfigParseError::NoProjectDirs);
+            }
+        }
+        // By now, `self.log_directory` is guaranteed to be `Some(valid_dir)`
+
+        Ok(())
     }
 }

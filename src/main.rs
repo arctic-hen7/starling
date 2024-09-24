@@ -3,7 +3,9 @@ use error::Error;
 use fs_engine::FsEngine;
 use graph::Graph;
 use logging::setup_logging;
+use server::make_app;
 use std::{path::PathBuf, sync::Arc};
+use tokio::net::TcpListener;
 use tracing::info;
 
 mod config;
@@ -17,6 +19,7 @@ mod logging;
 mod node;
 mod patch;
 mod path_node;
+mod server;
 #[cfg(test)]
 mod tests;
 
@@ -55,9 +58,21 @@ async fn core() -> Result<(), Error> {
     let fs_engine = FsEngine::new(graph.clone(), initial_writes);
     let fs_engine_task = fs_engine.run(dir)?;
     info!("about to start filesystem engine");
-    fs_engine_task.await;
+    tokio::spawn(fs_engine_task);
 
-    // TODO: Set up a server
+    // Set up the server
+    let config = STARLING_CONFIG.get();
+    let listener = TcpListener::bind((config.host.as_str(), config.port))
+        .await
+        .map_err(|err| Error::ListenFailed {
+            host: config.host.clone(),
+            port: config.port,
+            err,
+        })?;
+    info!("about to start server");
+    axum::serve(listener, make_app(graph))
+        .await
+        .map_err(|err| Error::ServeFailed { err })?;
 
     Ok(())
 }

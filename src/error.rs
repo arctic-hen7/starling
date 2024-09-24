@@ -13,6 +13,19 @@ pub enum Error {
     NotifyError(#[from] notify::Error),
     #[error("please provide a directory for Starling to track")]
     NoDir,
+    #[error("failed to bind listener on {host}:{port}")]
+    ListenFailed {
+        host: String,
+        port: u16,
+        #[source]
+        err: std::io::Error,
+    },
+    // This could happen at any time (e.g. firewall rules change)
+    #[error("server failed")]
+    ServeFailed {
+        #[source]
+        err: std::io::Error,
+    },
 }
 
 /// Errors that can occur when parsing the configuration for a path tracked by Starling.
@@ -29,12 +42,6 @@ pub enum ConfigParseError {
         path: PathBuf,
         #[source]
         err: toml::de::Error,
-    },
-    #[error("found no config file, but failed to write default to {path:?}")]
-    WriteDefaultFailed {
-        path: PathBuf,
-        #[source]
-        err: std::io::Error,
     },
     #[error("cannot have the empty string as a valid link type (this will be handled as the default case automatically)")]
     EmptyLinkType,
