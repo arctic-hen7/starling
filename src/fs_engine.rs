@@ -9,7 +9,7 @@ use crossbeam_queue::SegQueue;
 use futures::{future::join_all, Future};
 use notify::{
     event::{CreateKind, ModifyKind},
-    EventKind as NotifyEvent, RecursiveMode, Watcher,
+    EventKind as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher,
 };
 use std::{
     collections::HashSet,
@@ -39,16 +39,25 @@ pub struct FsEngine {
     /// A number of millseconds after which, if there have been no filesystem events, the evnets
     /// received will be actioned.
     debounce_duration: u64,
+    watcher: Option<RecommendedWatcher>,
 }
 impl FsEngine {
     /// Create a new filesystem engine to handle the given graph, which should already have been
-    /// instantiated.
-    pub fn new(graph: Arc<Graph>) -> Self {
+    /// instantiated. This also takes some initial corrective writes.
+    pub fn new(graph: Arc<Graph>, writes: Vec<Write>) -> Self {
+        // Create our conflict detector and register the initial writes as an update (even though
+        // the probability of conflicts is near zero at application start)
+        let mut conflict_detector = ConflictDetector::new();
+        let patch_idx = conflict_detector.register_update();
+        let writes_queue = SegQueue::new();
+        writes_queue.push((writes, patch_idx));
+
         Self {
             graph,
             debounce_duration: STARLING_CONFIG.get().debounce_duration,
-            conflict_detector: ConflictDetector::new(),
-            writes_queue: Arc::new(SegQueue::new()),
+            conflict_detector,
+            writes_queue: Arc::new(writes_queue),
+            watcher: None,
         }
     }
     /// Start the filesystem engine, monitoring the filesystem for changes and updating the graph
@@ -106,6 +115,8 @@ impl FsEngine {
         watcher.watch(&dir, RecursiveMode::Recursive)?;
 
         Ok(async move {
+            self.watcher = Some(watcher);
+
             // This will hold an `AbortHandle` for the task that develops an I/O-resolved patch to
             // send to the graph
             let mut patch_task = None;

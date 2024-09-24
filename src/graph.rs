@@ -124,12 +124,13 @@ impl Graph {
         )
     }
     /// Creates a new graph, tracking all files in the given directory recursively. This will read
-    /// every file that can be parsed and parse them all.
+    /// every file that can be parsed and parse them all, returning both the graph itself and a
+    /// series of writes that should be made to correct any initial errors.
     ///
     /// # Panics
     ///
     /// This will panic if the provided path is not a valid directory.
-    pub async fn from_dir(dir: &Path) -> Self {
+    pub async fn from_dir(dir: &Path) -> (Self, Vec<Write>) {
         assert!(dir.is_dir());
 
         // Fake creation events recursively for everything in the directory
@@ -137,22 +138,24 @@ impl Graph {
         let patch = GraphPatch::from_events(creations).await;
 
         let this = Self::new();
-        this.process_fs_patch(patch).await;
+        let writes = this.process_fs_patch(patch).await;
 
-        this
+        (this, writes)
     }
     /// Rescans the given directory, completely reconstructing the graph from it, from scratch.
     /// This will take considerably longer than processing atomic file events, and should only be
-    /// done if absolutely necessary.
-    pub async fn rescan(&mut self, dir: &Path) {
+    /// done if absolutely necessary. This returns any correcting writes needed.
+    pub async fn rescan(&mut self, dir: &Path) -> Vec<Write> {
         let mut nodes = self.nodes.write().await;
         let mut paths = self.paths.write().await;
         let mut invalid_connections = self.invalid_connections.write().await;
 
-        let new_graph = Self::from_dir(&dir).await;
+        let (new_graph, writes) = Self::from_dir(&dir).await;
         *nodes = new_graph.nodes.into_inner();
         *paths = new_graph.paths.into_inner();
         *invalid_connections = new_graph.invalid_connections.into_inner();
+
+        writes
     }
     /// Process a batch of updates from the filesystem. This operates as the start of a pipeline,
     /// generating modifications which in turn generate instructions for locking and graph updates.

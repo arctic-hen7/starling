@@ -78,11 +78,11 @@ async fn core() -> Result<(), Error> {
         .init();
 
     // Any errors on each path would be accumulated into each path
-    let graph = Graph::from_dir(&dir).await;
+    let (graph, initial_writes) = Graph::from_dir(&dir).await;
     let graph = Arc::new(graph);
 
     // Start up the filesystem processing engine and let it run forever
-    let fs_engine = FsEngine::new(graph.clone());
+    let fs_engine = FsEngine::new(graph.clone(), initial_writes);
     let fs_engine_task = fs_engine.run(dir)?;
     info!("about to start filesystem engine");
     fs_engine_task.await;
