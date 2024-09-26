@@ -20,6 +20,19 @@ impl Event {
             Event::Rename(p, _) => p,
         }
     }
+    /// Turns this path into one relative to the current working directory, if it's in the current
+    /// working directory. This acts on all paths in the event.
+    pub fn decanonicalize(&mut self, cwd: &Path) {
+        match self {
+            Event::Create(p) => *p = p.strip_prefix(cwd).unwrap_or(p).to_path_buf(),
+            Event::Delete(p) => *p = p.strip_prefix(cwd).unwrap_or(p).to_path_buf(),
+            Event::Modify(p) => *p = p.strip_prefix(cwd).unwrap_or(p).to_path_buf(),
+            Event::Rename(from, to) => {
+                *from = from.strip_prefix(cwd).unwrap_or(from).to_path_buf();
+                *to = to.strip_prefix(cwd).unwrap_or(to).to_path_buf();
+            }
+        }
+    }
     /// Updates the path on this event. For rename events, the old path will be changed and the new
     /// path left unaltered.
     fn with_path(self, p: PathBuf) -> Self {

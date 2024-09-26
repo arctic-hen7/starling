@@ -9,6 +9,7 @@ use std::path::PathBuf;
 ///
 /// This is designed to consume a [`DebouncedEvents`] object, and cannot be extended continually
 /// from one. This asynchronous work should be done in a single batch when ready.
+#[derive(Debug)]
 pub struct GraphPatch {
     /// A list of paths in the domain which have been renamed from the first element of the tuple
     /// to the second.
@@ -102,5 +103,17 @@ impl PathPatch {
         } else {
             None
         }
+    }
+}
+// When debugging this, don't print the whole contents
+impl std::fmt::Debug for PathPatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PathPatch")
+            .field("path", &self.path)
+            .field(
+                "contents_res",
+                &self.contents_res.as_ref().map(|_| "[contents]"),
+            )
+            .finish()
     }
 }

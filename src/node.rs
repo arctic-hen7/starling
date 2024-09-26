@@ -1,5 +1,5 @@
 use orgish::{Format, Timestamp};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -113,18 +113,24 @@ pub struct NodeConnection {
     pub types: HashSet<String>,
 }
 
+/// Options that can be used to customize the information returned about a node.
+#[derive(Deserialize)]
 pub struct NodeOptions {
     /// Whether or not to return the body of this node (this may be arbitrarily large).
+    #[serde(default)]
     pub body: bool,
     /// Whether or not to return metadata about the requested node itself, like schedule
     /// information, and properties. Particularly properties may be arbitrarily large. Note that
     /// tags will always be returned.
+    #[serde(default)]
     pub metadata: bool,
     /// Whether or not to return the IDs of the direct children of this node.
+    #[serde(default)]
     pub children: bool,
     /// Whether or not to return connections and backlinks for this node. This doesn't incur
     /// additional computation so much as additional locking, so it should be avoided if it isn't
     /// needed.
+    #[serde(default)]
     pub connections: bool,
     /// Whether or not to return connections and backlinks in the children. These "logically"
     /// inherit upwards (e.g. if another node connects to a node a child, then it implicitly
@@ -132,6 +138,7 @@ pub struct NodeOptions {
     /// be used when necessary.
     ///
     /// If this is `true` and `connections` is false, this will be treated as `false`.
+    #[serde(default)]
     pub child_connections: bool,
     /// The format links should be serialized to (Markdown or Org).
     pub conn_format: Format,

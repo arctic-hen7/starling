@@ -13,7 +13,7 @@ use notify::{
 };
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{select, sync::mpsc};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// The engine that powers Starling's filesystem interactions. This is responsible for monitoring
 /// and debouncing filesystem changes, developing them into patches, and actioning them within the
@@ -60,8 +60,11 @@ impl FsEngine {
     /// task.
     ///
     /// This takes the same directory as the graph started on.
+    #[tracing::instrument(skip_all)]
     pub fn run(mut self, dir: PathBuf) -> Result<impl Future<Output = ()> + Send, notify::Error> {
         assert!(dir.is_dir());
+        // We'll need this to turn absolute event paths into relative paths
+        let cwd = dir.canonicalize().unwrap();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut watcher =
@@ -70,6 +73,7 @@ impl FsEngine {
                     if ev.need_rescan() {
                         // The watcher backend missed something, we need to rescan *everything*
                         let _ = tx.send(None);
+                        info!("sent rescan event");
                     }
 
                     // If we couldn't send over the channel, the main engine has gone down, and so
@@ -80,22 +84,40 @@ impl FsEngine {
                             CreateKind::Folder => Ok(()),
                             // But if it's definitely a file, or if we're unsure, let the path
                             // patch system handle it
-                            _ => tx.send(Some(Event::Create(ev.paths[0].clone()))),
+                            _ => {
+                                info!("sent creation event for {:?}", ev.paths[0]);
+                                tx.send(Some(Event::Create(ev.paths[0].clone())))
+                            }
                         },
                         NotifyEvent::Modify(modify_kind) => match modify_kind {
                             ModifyKind::Data(_) | ModifyKind::Any | ModifyKind::Other => {
+                                info!("sent modification event for {:?}", ev.paths[0]);
                                 tx.send(Some(Event::Modify(ev.paths[0].clone())))
                             }
                             // We don't need to do anything for a metadata change
                             ModifyKind::Metadata(_) => Ok(()),
                             // We technically don't know if both paths will be present if the
                             // notifier hasn't stitched them together, but we'll find out!
-                            ModifyKind::Name(_) => tx.send(Some(Event::Rename(
-                                ev.paths[0].clone(),
-                                ev.paths[1].clone(),
-                            ))),
+                            ModifyKind::Name(_) if ev.paths.len() > 1 => {
+                                info!(
+                                    "sent rename event for {:?} -> {:?}",
+                                    ev.paths[0], ev.paths[1]
+                                );
+                                tx.send(Some(Event::Rename(
+                                    ev.paths[0].clone(),
+                                    ev.paths[1].clone(),
+                                )))
+                            }
+                            // Rename event with only one path, ignore
+                            ModifyKind::Name(_) => {
+                                info!("received single-path rename event, ignoring");
+                                Ok(())
+                            }
                         },
-                        NotifyEvent::Remove(_) => tx.send(Some(Event::Delete(ev.paths[0].clone()))),
+                        NotifyEvent::Remove(_) => {
+                            info!("sent deletion event for {:?}", ev.paths[0]);
+                            tx.send(Some(Event::Delete(ev.paths[0].clone())))
+                        }
 
                         // Non-modifying accesses don't concern us
                         NotifyEvent::Access(_) => Ok(()),
@@ -208,15 +230,21 @@ impl FsEngine {
                                 // ones who can really observe this, and we should ensure we aren't
                                 // accumulating pointlessly on already-handled events.
                                 debounced_events = DebouncedEvents::new();
+                                info!("received fs event, patch task finished");
                             } else {
                                 // We've aborted *and* set the handle to `None`, meaning that's a
                                 // reliable signal
                                 patch_task.abort();
+                                info!("received fs event and aborted in-progress patch task");
                             }
                         }
 
                         if let Some(event_opt) = res {
-                            if let Some(event) = event_opt {
+                            if let Some(mut event) = event_opt {
+                                // The paths we get for events are absolute, but the paths in the
+                                // graph have to be relative, so decanonicalize with respect to our
+                                // directory
+                                event.decanonicalize(&cwd);
                                 // Debounce in real time because it's fast and ensures we have a
                                 // map of paths to events. Be sure *not* to record this if this was
                                 // a path we just wrote to though, to prevent infinite loops.
@@ -225,7 +253,10 @@ impl FsEngine {
                                     // allow the event through (but we really should have seen a
                                     // modification first, so a bit weird)
                                     match event {
-                                        Event::Modify(_) => continue,
+                                        Event::Modify(_) => {
+                                            info!("saw self-write modification, skipping");
+                                            continue;
+                                        },
                                         _ => warn!(
                                             "saw non-modification on self-write"
                                         )
