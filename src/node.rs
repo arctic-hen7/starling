@@ -143,6 +143,7 @@ pub struct NodeOptions {
     /// The format links should be serialized to (Markdown or Org).
     pub conn_format: Format,
 }
+#[cfg(test)]
 impl NodeOptions {
     pub fn new(format: Format) -> Self {
         Self {

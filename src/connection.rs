@@ -170,30 +170,14 @@ impl<'a> ConnectionRef<'a> {
 pub struct ConnectionMut<'a> {
     id: Uuid,
     valid: &'a mut bool,
-    variants: &'a mut Vec<Connection>,
+    variants: &'a mut Vec<Connection>, // NOTE: Keep, will modify in queries
 }
 impl<'a> ConnectionMut<'a> {
     pub fn id(&self) -> Uuid {
         self.id
     }
-    pub fn is_valid(&self) -> bool {
-        *self.valid
-    }
     pub fn set_valid(&mut self, valid: bool) {
         *self.valid = valid;
-    }
-}
-pub struct OwnedConnection {
-    id: Uuid,
-    valid: bool,
-    variants: Vec<Connection>,
-}
-impl OwnedConnection {
-    pub fn id(&self) -> Uuid {
-        self.id
-    }
-    pub fn is_valid(&self) -> bool {
-        self.valid
     }
 }
 
