@@ -133,10 +133,12 @@ impl DebouncedEvents {
                 .into_iter()
                 .filter_map(|entry| entry.ok())
                 .map(|entry| {
-                    (
-                        entry.path().to_path_buf(),
-                        (None, Some(Event::Create(entry.path().to_path_buf()))),
-                    )
+                    // Be careful to decanonicalize so the paths we use in the graph are correct
+                    // (and so the self-write blocking system works and we don't have to do all
+                    // this twice)
+                    let mut event = Event::Create(entry.path().to_path_buf());
+                    event.decanonicalize(dir);
+                    (event.path().to_path_buf(), (None, Some(event)))
                 })
                 .collect(),
         }

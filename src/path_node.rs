@@ -45,6 +45,10 @@ impl PathNode {
         let (path_node, updates) = dummy.update(path, contents_res);
         (path_node, updates)
     }
+    /// Directly renames this [`PathNode`] to have a different path.
+    pub fn rename(&mut self, to: PathBuf) {
+        self.path = to;
+    }
     /// Creates a series of patches for the deletion of this path. This makes no changes to the
     /// actual contents of this path, it just generates the instructions necessary to remove if
     /// entirely from the graph.

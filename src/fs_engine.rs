@@ -13,7 +13,7 @@ use notify::{
 };
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 use tokio::{select, sync::mpsc};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, span, warn, Level};
 
 /// The engine that powers Starling's filesystem interactions. This is responsible for monitoring
 /// and debouncing filesystem changes, developing them into patches, and actioning them within the
@@ -69,6 +69,8 @@ impl FsEngine {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut watcher =
             notify::recommended_watcher(move |ev: Result<notify::Event, notify::Error>| {
+                let span = span!(Level::INFO, "notify_watcher");
+                let _enter = span.enter();
                 if let Ok(ev) = ev {
                     if ev.need_rescan() {
                         // The watcher backend missed something, we need to rescan *everything*
@@ -85,13 +87,13 @@ impl FsEngine {
                             // But if it's definitely a file, or if we're unsure, let the path
                             // patch system handle it
                             _ => {
-                                info!("sent creation event for {:?}", ev.paths[0]);
+                                debug!("sent creation event for {:?}", ev.paths[0]);
                                 tx.send(Some(Event::Create(ev.paths[0].clone())))
                             }
                         },
                         NotifyEvent::Modify(modify_kind) => match modify_kind {
                             ModifyKind::Data(_) | ModifyKind::Any | ModifyKind::Other => {
-                                info!("sent modification event for {:?}", ev.paths[0]);
+                                debug!("sent modification event for {:?}", ev.paths[0]);
                                 tx.send(Some(Event::Modify(ev.paths[0].clone())))
                             }
                             // We don't need to do anything for a metadata change
@@ -99,7 +101,7 @@ impl FsEngine {
                             // We technically don't know if both paths will be present if the
                             // notifier hasn't stitched them together, but we'll find out!
                             ModifyKind::Name(_) if ev.paths.len() > 1 => {
-                                info!(
+                                debug!(
                                     "sent rename event for {:?} -> {:?}",
                                     ev.paths[0], ev.paths[1]
                                 );
@@ -110,12 +112,12 @@ impl FsEngine {
                             }
                             // Rename event with only one path, ignore
                             ModifyKind::Name(_) => {
-                                info!("received single-path rename event, ignoring");
+                                debug!("received single-path rename event, ignoring");
                                 Ok(())
                             }
                         },
                         NotifyEvent::Remove(_) => {
-                            info!("sent deletion event for {:?}", ev.paths[0]);
+                            debug!("sent deletion event for {:?}", ev.paths[0]);
                             tx.send(Some(Event::Delete(ev.paths[0].clone())))
                         }
 
@@ -145,6 +147,8 @@ impl FsEngine {
             loop {
                 select! {
                     _ = tokio::time::sleep(Duration::from_millis(self.debounce_duration)) => {
+                        let span = span!(Level::INFO, "debounce_timeout");
+                        let _enter = span.enter();
                         // The timer elapsed before we received another event, let's check if
                         // there's already a patch task running (if so, it wasn't cancelled by a
                         // new event, so we can't have any new events, so we should do nothing)
@@ -154,22 +158,33 @@ impl FsEngine {
                         // if the previous task finishes, and we have a handle, then there hasn't
                         // been an intermediate event to set it back to `None`, so there's no point
                         // in starting another patch processor.
+                        //
+                        // Note that all this will run the first time with an empty patch, which
+                        // won't do anything.
                         if patch_task.is_none() {
                             // Record that a new patch is starting for the conflict detector
                             let patch_idx = self.conflict_detector.add_patch(debounced_events.clone());
 
                             let debounced_events_clone = debounced_events.clone();
+                            info!("starting new patch task {}: {:?}", patch_idx, debounced_events);
+
                             let graph = self.graph.clone();
                             let writes_queue = self.writes_queue.clone();
+                            let dir = dir.clone();
                             patch_task = Some(tokio::spawn(async move {
-                                let patch = GraphPatch::from_events(debounced_events_clone).await;
+                                let patch = GraphPatch::from_events(debounced_events_clone, &dir).await;
 
                                 // Hand off the graph processing to another task (it's *not*
                                 // cancel-safe, and there's no need to cancel it, many of these can
                                 // run simultaneously)
                                 tokio::spawn(async move {
+                                    let span = span!(Level::INFO, "graph_processing");
+                                    let _enter = span.enter();
+
+                                    info!("about to process fs patch {patch_idx} on graph");
                                     let writes = graph.process_fs_patch(patch).await;
                                     writes_queue.push((writes, patch_idx));
+                                    info!("finished processing fs patch {patch_idx} on graph");
                                 });
                             }));
                         }
@@ -185,32 +200,32 @@ impl FsEngine {
                         // write these in a moment, so there won't be any more conflicts we can do
                         // anything about.
                         let mut write_futs = Vec::new();
+                        let mut local_self_writes = HashSet::new();
                         while let Some((writes, patch_idx)) = self.writes_queue.pop() {
                             let updated_writes =
                                 self.conflict_detector.detect_conflicts(patch_idx, writes);
                             for write in updated_writes {
                                 match write.conflict {
                                     Conflict::None => {
+                                        let full_path = dir.join(&write.path);
                                         write_futs.push(
-                                            tokio::fs::write(write.path.clone(), write.contents)
+                                            tokio::fs::write(full_path.clone(), write.contents)
                                         );
-                                        // Record that we've written to this path
-                                        self_writes.insert(write.path);
+                                        info!("wrote to '{:?}'", full_path);
+                                        // Prepare to record that we soon will have written to this
+                                        // path (using the decanonicalized version)
+                                        local_self_writes.insert(write.path);
                                     },
                                     Conflict::Simple => {
                                         // The modification in `write.contents` conflicts with the
                                         // state on the disk
-                                        eprintln!("[ERROR]: Conflict in '{:?}'", write.path);
+                                        error!("conflict in {:?}", write.path);
                                     }
                                     Conflict::Multi(paths) => {
                                         // The path we want to write to was renamed, recreated, and
                                         // renamed to somewhere else at least once, meaning we
                                         // don't know where to send our modification
-                                        eprintln!(
-                                            "[ERROR]: Conflict with write to '{:?}', could go to any of {:?}",
-                                            write.path,
-                                            paths
-                                        );
+                                        error!("conflict with write to '{:?}', could go to any of {:?}", write.path, paths);
                                     }
                                 }
                             }
@@ -218,6 +233,8 @@ impl FsEngine {
                         // Action all those writes (yes, a conflict could occur during this, but
                         // there's nothing we can possibly do about that)
                         join_all(write_futs).await;
+                        // *Now* record that we've written to all those paths
+                        self_writes.extend(local_self_writes);
                     },
                     res = rx.recv() => {
                         // Receiving an event means any partly or fully developed I/O patches have
@@ -254,7 +271,7 @@ impl FsEngine {
                                     // modification first, so a bit weird)
                                     match event {
                                         Event::Modify(_) => {
-                                            info!("saw self-write modification, skipping");
+                                            info!("saw self-write modification on {:?}, skipping", event.path());
                                             continue;
                                         },
                                         _ => warn!(
@@ -262,6 +279,7 @@ impl FsEngine {
                                         )
                                     }
                                 }
+                                debug!("debouncing event on {:?}", event.path());
                                 debounced_events.push(event);
                             } else {
                                 // We need to rescan everything

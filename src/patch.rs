@@ -3,7 +3,8 @@ use futures::{
     future::{join, join_all},
     Future,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tracing::debug;
 
 /// A patch to a graph which has resolved all I/O-bound operations.
 ///
@@ -33,7 +34,7 @@ impl GraphPatch {
     /// applied as a CPU-bound task. In essence, this does all the I/O that might be needed.
     ///
     /// Any errors in reading from a particular path will be stored as errors in the patch output.
-    pub async fn from_events(events: DebouncedEvents) -> Self {
+    pub async fn from_events(events: DebouncedEvents, dir: &Path) -> Self {
         let mut creations_futs = Vec::new();
         let mut modifications_futs = Vec::new();
         let mut renames = Vec::new();
@@ -50,12 +51,12 @@ impl GraphPatch {
                 match event {
                     Event::Delete(_) => deletions.push(new_path),
                     Event::Create(_) => {
-                        if let Some(patch_fut) = PathPatch::new(new_path) {
+                        if let Some(patch_fut) = PathPatch::new(new_path, dir) {
                             creations_futs.push(patch_fut);
                         }
                     }
                     Event::Modify(_) => {
-                        if let Some(patch_fut) = PathPatch::new(new_path) {
+                        if let Some(patch_fut) = PathPatch::new(new_path, dir) {
                             modifications_futs.push(patch_fut);
                         }
                     }
@@ -88,19 +89,24 @@ pub struct PathPatch {
 impl PathPatch {
     /// Creates a new [`PathPatch`] from the given path. This is entirely self-contained, and, if
     /// many patches need to be constructed, they should be done in parallel. All this does is read
-    /// files.
+    /// files. This takes paths in the context of the directory being watched, so it also needs to
+    /// know where that is.
     ///
     /// This will return [`None`] if the path doesn't need a patch constructed from it (i.e. if it
     /// isn't one of the types of files we track, or if it isn't a file at all).
-    pub fn new(path: PathBuf) -> Option<impl Future<Output = PathPatch>> {
-        let ext = path.extension().unwrap_or_default();
-        if (ext == "org" || ext == "md" || ext == "markdown") && path.is_file() {
+    #[tracing::instrument]
+    pub fn new(path: PathBuf, dir: &Path) -> Option<impl Future<Output = PathPatch>> {
+        // We are the only tikme this path is *actually* used for the filesystem!
+        let full_path = dir.join(&path);
+        let ext = full_path.extension().unwrap_or_default();
+        if (ext == "org" || ext == "md" || ext == "markdown") && full_path.is_file() {
             Some(async move {
                 // Read the contents
-                let contents_res = tokio::fs::read_to_string(&path).await;
+                let contents_res = tokio::fs::read_to_string(&full_path).await;
                 PathPatch { path, contents_res }
             })
         } else {
+            debug!("denied path patch creation for {:?}", full_path);
             None
         }
     }
