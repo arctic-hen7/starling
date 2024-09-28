@@ -78,8 +78,8 @@ impl PathNode {
                 }
                 // Any connections *to* this node must also be rendered invalid
                 for backlink_id in removed_node.backlinks() {
-                    updates.push(GraphUpdate::InvalidateConnection {
-                        on: *backlink_id,
+                    updates.push(GraphUpdate::CheckConnection {
+                        from: *backlink_id,
                         to: *removed_node_id,
                     })
                 }
@@ -334,7 +334,7 @@ impl PathNode {
 
         // If we're updating from a previous version of the document, we should transfer connection
         // information over (i.e. retained connections that were originally valid should remain
-        // valid), and also determine which vertices (i.e. headings) have been maintained, added,
+        // valid), and also determine which nodes (i.e. headings) have been maintained, added,
         // or removed.
         let mut updates = Vec::new();
         if let Some(old_doc) = &self.document {
@@ -362,23 +362,21 @@ impl PathNode {
                 }
                 // Any connections *to* this node must also be rendered invalid
                 for backlink_id in removed_node.backlinks() {
-                    updates.push(GraphUpdate::InvalidateConnection {
-                        on: *backlink_id,
+                    updates.push(GraphUpdate::CheckConnection {
+                        from: *backlink_id,
                         to: *removed_node_id,
                     })
                 }
 
                 // And then instruct the removal of the node entirely
-                updates.push(GraphUpdate::RemoveNode(*removed_node_id))
+                updates.push(GraphUpdate::RemoveNode(*removed_node_id));
             }
             for new_node_id in node_ids.difference(&self.node_ids) {
+                // This will both add the node and validate any previously invalid connections
                 updates.push(GraphUpdate::AddNode {
                     id: *new_node_id,
                     path: path.clone(),
                 });
-                // Also be sure to validate any previously invalid connections to the ID of our new
-                // node
-                updates.push(GraphUpdate::ValidateInvalidConnection { to: *new_node_id });
                 // We'll need to check all of this node's connections, they're all new (no point in
                 // using info from other nodes in this tree to check validity, we'll need to create
                 // backlinks anyway)
@@ -424,7 +422,8 @@ impl PathNode {
                         })
                     }
                 }
-                // Go through any connections left on the old node
+                // Go through any connections left on the old node (these weren't transferred over,
+                // so they're no longer present)
                 for (id, raw_conn) in old_node_connections.into_iter() {
                     // If this connection was valid, we should remove the backlink
                     if raw_conn.valid() {

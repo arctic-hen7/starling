@@ -21,8 +21,10 @@ pub enum GraphUpdate {
     ModifyPathNode { path: PathBuf, new_node: PathNode },
     /// The [`PathNode`] with the provided path should be deleted from the graph.
     DeletePathNode(PathBuf),
-    /// The provided node should be added to the graph. This does *not* include a connection
-    /// validation instruction.
+    /// The provided node should be added to the graph. This will check the invalid connections map
+    /// to validate any previously invalid connections other nodes had to this one (i.e. backlinks
+    /// will be created, titles will be updated, etc. --- this creates
+    /// [`GraphUpdate::CheckConnection`] instructions).
     ///
     /// As new nodes may have IDs that have been force-generated during parsing, any paths subject
     /// to one of these will be written to disk.
@@ -40,14 +42,6 @@ pub enum GraphUpdate {
     /// drop it entirely (we only keep track of them to speed the process of validating previously
     /// existing connections to newly valid created nodes).
     RemoveInvalidConnection { from: Uuid, to: Uuid },
-    /// We should make the connection to the given node, which was previously recorded in the
-    /// global tracker as invalid, as valid. This will involve creating a backlink on every node
-    /// that referenced it, and removing the entry from the global tracker.
-    ///
-    /// Any paths found to be referencing this previously invalid connection will be written to
-    /// disk with updated connection titles (handled through the [`GraphUpdate::CheckConnection`]
-    /// instructions this implicitly generates).
-    ValidateInvalidConnection { to: Uuid },
     /// We should check if the connection from the node with the given ID to the node with the
     /// given ID is valid. If so, we should set it as valid and create an appropriate backlink, and
     /// if not, we should leave it as invalid and register it in a global map that accounts for
@@ -56,16 +50,12 @@ pub enum GraphUpdate {
     ///
     /// Note that this is also used for rendering valid connections that were previously marked as
     /// invalid in the global tracker when a node with the (invalid) ID they pointed to is created
-    /// (in which case we know this will succeed).
+    /// (in which case we know this will succeed). It is also used to invalidate known-bad
+    /// connections.
     ///
     /// If the connection is found to be valid, the path which made the connection will be written
     /// to disk with any updated connection titles.
     CheckConnection { from: Uuid, to: Uuid },
-    /// We should set the connection on the node with the given ID which goes to the other node
-    /// with the given ID to be invalid. This is used when the node to which the connection goes is
-    /// being removed. The target connection should be added to the global map of invalid
-    /// connections in case it's re-created.
-    InvalidateConnection { on: Uuid, to: Uuid },
 }
 impl std::fmt::Debug for GraphUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,14 +73,8 @@ impl std::fmt::Debug for GraphUpdate {
             GraphUpdate::RemoveInvalidConnection { from, to } => {
                 write!(f, "RemoveInvalidConnection({:?}, {:?})", from, to)
             }
-            GraphUpdate::ValidateInvalidConnection { to } => {
-                write!(f, "ValidateInvalidConnection({:?})", to)
-            }
             GraphUpdate::CheckConnection { from, to } => {
                 write!(f, "CheckConnection({:?}, {:?})", from, to)
-            }
-            GraphUpdate::InvalidateConnection { on, to } => {
-                write!(f, "InvalidateConnection({:?}, {:?})", on, to)
             }
         }
     }
@@ -232,6 +216,12 @@ impl Graph {
         // others are async. We do deletions first to avoid possible ID conflicts and the like.
         let mut creation_updates = Vec::new();
         let paths = self.paths.read().await;
+        for path_patch in patch.creations {
+            let (path_node, mut updates_l) =
+                PathNode::new(path_patch.path, path_patch.contents_res);
+            updates_l.push(GraphUpdate::CreatePathNode(path_node));
+            creation_updates.push(updates_l);
+        }
         let mut deletion_futs = Vec::new();
         for path in patch.deletions {
             // We by definition can't do anything with a bad deletion, so ignore it if we can't
@@ -271,12 +261,6 @@ impl Graph {
                 updates_l.push(GraphUpdate::CreatePathNode(path_node));
                 creation_updates.push(updates_l);
             }
-        }
-        for path_patch in patch.creations {
-            let (path_node, mut updates_l) =
-                PathNode::new(path_patch.path, path_patch.contents_res);
-            updates_l.push(GraphUpdate::CreatePathNode(path_node));
-            creation_updates.push(updates_l);
         }
 
         // These are both `Vec<Vec<GraphUpdate>>`
@@ -367,33 +351,30 @@ impl Graph {
                     should_lock_paths = true;
                     debug!("will lock `paths` for path node update");
                 }
-                GraphUpdate::AddNode { .. } | GraphUpdate::RemoveNode(_) => {
-                    should_lock_nodes = true;
-
+                GraphUpdate::AddNode { id, ref path } => {
                     // Adding a new node might make some connections that were previously invalid
-                    // valid, so we could need the invalid connections map as well
-                    if let GraphUpdate::AddNode { id, ref path } = update {
-                        should_lock_invalid_connections = true;
-                        debug!("will lock `invalid_connections` for new node {id} in {path:?}");
+                    // valid, so we could need the invalid connections map as well (we'll only find
+                    // out which nodes we need to lock when we hit this instruction!)
+                    should_lock_invalid_connections = true;
+                    debug!("will lock `invalid_connections` for new node {id} in {path:?}");
 
-                        // A new node might have had an ID force-created for it during parsing, so
-                        // we should write this path back to the disk to ensure ID stability
-                        paths_to_write.insert(path.clone());
-                        debug!("will write to path {path:?} for new node {id}");
-                        // We need to lock that path in order to write to it, and this ID comes
-                        // from it, so locking that is sufficient
-                        nodes_to_lock.insert(id);
-                        debug!("will lock new node {id} in {path:?}");
-                    }
+                    // A new node might have had an ID force-created for it during parsing, so
+                    // we should write this path back to the disk to ensure ID stability
+                    paths_to_write.insert(path.clone());
+                    debug!("will write to path {path:?} for new node {id}");
+                    // We need to lock that path in order to write to it, and this ID comes
+                    // from it, so locking that is sufficient
+                    nodes_to_lock.insert(id);
+                    debug!("will lock new node {id} in {path:?}");
 
+                    should_lock_nodes = true;
+                    debug!("will lock `nodes` for new node {id} in {path:?}");
                     map_updates.push(update);
                 }
-                GraphUpdate::ValidateInvalidConnection { to } => {
-                    should_lock_invalid_connections = true;
+                GraphUpdate::RemoveNode(_) => {
+                    should_lock_nodes = true;
                     map_updates.push(update);
-                    debug!("will lock `invalid_connections` to validate previously invalid connection to {to}");
-                    // We will need to lock some nodes, but we don't know which ones until we see
-                    // the map
+                    debug!("will lock `nodes` for node removal");
                 }
                 GraphUpdate::RemoveInvalidConnection { from, to } => {
                     map_updates.push(update);
@@ -402,11 +383,6 @@ impl Graph {
                 }
 
                 // Node updates (stage 2)
-                GraphUpdate::InvalidateConnection { on, to } => {
-                    node_updates.push(update);
-                    nodes_to_lock.insert(on);
-                    debug!("will lock {on} to invalidate its connection to {to}");
-                }
                 GraphUpdate::RemoveBacklink { on, from } => {
                     node_updates.push(update);
                     nodes_to_lock.insert(on);
@@ -459,8 +435,6 @@ impl Graph {
         for update in map_updates {
             match update {
                 GraphUpdate::CreatePathNode(path_node) => {
-                    // BUG: Multiple adds of the same path that contain different nodes could be a
-                    // problem...
                     if paths.as_ref().unwrap().contains_key(&path_node.path()) {
                         error!("tried to create new path node for {:?} that was already present in graph", path_node.path());
                     }
@@ -473,7 +447,6 @@ impl Graph {
                     debug!("inserted new path node for {:?}", path);
                 }
                 GraphUpdate::ModifyPathNode { path, new_node } => {
-                    // TODO: What do we do if this has already been removed?
                     if !paths.as_ref().unwrap().contains_key(&path) {
                         error!("tried to modify path node for {path:?} that wasn't in the graph");
                     }
@@ -500,6 +473,31 @@ impl Graph {
 
                     nodes.as_mut().unwrap().insert(id, path.clone());
                     debug!("added new node {id} in {path:?}");
+
+                    // We'll need to add backlinks to all the nodes that referenced this when it
+                    // was an invalid connection (if it ever was). This is the only time we add
+                    // more nodes to lock or create new instructions (fine because of the node/map
+                    // update separation).
+                    if let Some(referrers) = invalid_connections.as_mut().unwrap().remove(&id) {
+                        nodes_to_lock.insert(id);
+                        debug!("will lock {id} to maybe add backlinks for previously invalid connections");
+
+                        for referrer in referrers {
+                            // NOTE: This is the only instance where we retroactively add an
+                            // update. We replicate perfectly the logic we would have used to
+                            // handle it though, including ordering the locking of the appropriate
+                            // nodes, so in this case, this violation of the overall paradigm is
+                            // acceptable.
+                            node_updates.push(GraphUpdate::CheckConnection {
+                                from: referrer,
+                                to: id,
+                            });
+                            nodes_to_lock.insert(referrer);
+                            debug!("will lock {referrer} to check its previously invalid connection to {id}");
+                        }
+                    } else {
+                        debug!("tried to validate unrecorded invalid connections to {id}");
+                    }
                 }
                 GraphUpdate::RemoveNode(node_id) => {
                     // This certainly should still exist, but it's no big deal if it doesn't
@@ -508,27 +506,6 @@ impl Graph {
                         debug!("removed node {node_id}");
                     } else {
                         debug!("tried to remove node {node_id} that wasn't in the graph");
-                    }
-                }
-                GraphUpdate::ValidateInvalidConnection { to } => {
-                    // We'll need to add backlinks to all the nodes that referenced this invalid
-                    // connection
-                    if let Some(referrers) = invalid_connections.as_mut().unwrap().remove(&to) {
-                        nodes_to_lock.insert(to);
-                        debug!("will lock {to} to maybe add backlinks for previously invalid connections");
-
-                        for referrer in referrers {
-                            // NOTE: This is the only instance where we retroactively add an
-                            // update. We replicate perfectly the logic we would have used to
-                            // handle it though, including ordering the locking of the appropriate
-                            // nodes, so in this case, this violation of the overall paradigm is
-                            // acceptable.
-                            node_updates.push(GraphUpdate::CheckConnection { from: referrer, to });
-                            nodes_to_lock.insert(referrer);
-                            debug!("will lock {referrer} to check its previously invalid connection to {to}");
-                        }
-                    } else {
-                        debug!("tried to validate unrecorded invalid connections to {to}");
                     }
                 }
                 GraphUpdate::RemoveInvalidConnection { from, to } => {
@@ -608,17 +585,6 @@ impl Graph {
         // We now have everything we need to handle node-level updates
         for update in node_updates {
             match update {
-                GraphUpdate::InvalidateConnection { on, to } => {
-                    // If the target was deleted in another instruction, this doesn't matter
-                    // anymore
-                    if let Some(path) = nodes_ref.get(&on) {
-                        let path_node = path_nodes.get_mut(path).unwrap();
-                        path_node.invalidate_connection(on, to);
-                        debug!("invalidated connection from {on} to {to}");
-                    } else {
-                        debug!("tried to invalidate connection from unknown node {on}");
-                    }
-                }
                 GraphUpdate::RemoveBacklink { on, from } => {
                     // If the target was deleted in another instruction, this doesn't matter
                     // anymore
@@ -666,6 +632,10 @@ impl Graph {
                             paths_to_write.insert(path_from.clone());
                             debug!("will write to {path_from:?} after possible link title update");
                         } else {
+                            // This instruction is used to both add knowingly to the global map,
+                            // and to invalidate locally, so do both for good measure
+                            let path_node_from = path_nodes.get_mut(path_from).unwrap();
+                            path_node_from.invalidate_connection(from, to);
                             invalid_connections
                                 .as_mut()
                                 .unwrap()
