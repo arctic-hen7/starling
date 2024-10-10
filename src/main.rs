@@ -4,7 +4,7 @@ use fs_engine::FsEngine;
 use graph::Graph;
 use logging::setup_logging;
 use server::make_app;
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -51,7 +51,7 @@ async fn core() -> Result<(), Error> {
     setup_logging();
 
     // Any errors on each path would be accumulated into each path, so this can't fail
-    let (graph, initial_writes) = Graph::from_dir(&dir).await;
+    let (graph, initial_writes) = Graph::from_dir(&dir, HashMap::new()).await;
     let graph = Arc::new(graph);
 
     // Start up the filesystem processing engine and let it run forever

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 /// Creates the Axum app for serving over the network, using the given [`Graph`].
 pub fn make_app(graph: Arc<Graph>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route(
             "/node/:id",
             get(
@@ -36,7 +36,7 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
             "/nodes",
             get(
                 |State(graph): State<Arc<Graph>>, Json(opts): Json<GetNodesOpts>| async move {
-                    let nodes = graph.nodes(opts.format).await;
+                    let nodes = graph.nodes(None, opts.format).await;
                     Json(nodes)
                 },
             ),
@@ -69,8 +69,22 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
                 let cfg = STARLING_CONFIG.get();
                 Json(cfg.action_keywords.clone())
             }),
-        )
-        .with_state(graph)
+        );
+    // Add index methods
+    for index_name in graph.indices.names() {
+        let index_name = index_name.clone();
+        router = router.route(
+            &format!("/index/{}/nodes", index_name),
+            get(
+                |State(graph): State<Arc<Graph>>, Json(opts): Json<GetNodesOpts>| async move {
+                    let nodes = graph.nodes(Some(&index_name), opts.format).await;
+                    Json(nodes)
+                },
+            ),
+        );
+    }
+
+    router.with_state(graph)
 }
 
 #[derive(Deserialize)]

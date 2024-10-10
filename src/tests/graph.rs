@@ -3,11 +3,12 @@ use crate::{
     graph::*,
     node::{Node, NodeConnection, NodeMetadata, NodeOptions},
     patch::{GraphPatch, PathPatch},
+    path_node::StarlingNode,
 };
 use chrono::NaiveDate;
 use orgish::{timestamp::DateTime, Format, Timestamp};
-use std::path::PathBuf;
 use std::{collections::HashMap, sync::atomic::Ordering};
+use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
 
 /// Trait that allows [&str; _] to be converted to a `HashSet<String>`.
@@ -127,7 +128,7 @@ This deliberately doesn't have an ID."#;
 async fn should_parse_connections_and_node_data() {
     setup_config();
 
-    let graph = Graph::new();
+    let graph = Graph::new(HashMap::new());
     let writes: HashMap<_, _> = graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
@@ -491,7 +492,7 @@ ID: 6097edb8-7a66-45fe-aec3-eb957f511ab3
 
 This is a connection to [File 3](link:6097edb8-7a66-45fe-aec3-eb957f511ab2)."#;
 
-    let graph = Graph::new();
+    let graph = Graph::new(HashMap::new());
     let writes = graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
@@ -609,7 +610,7 @@ title: File 2
 
 Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
-    let graph = Graph::new();
+    let graph = Graph::new(HashMap::new());
     graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
@@ -737,7 +738,7 @@ title: File 2
 
 Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
-    let graph = Graph::new();
+    let graph = Graph::new(HashMap::new());
     graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
@@ -805,7 +806,7 @@ ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
 
 Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
-    let graph = Graph::new();
+    let graph = Graph::new(HashMap::new());
     graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
@@ -911,7 +912,7 @@ ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
 
 Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
-    let graph = Graph::new();
+    let graph = Graph::new(HashMap::new());
     graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
@@ -1001,7 +1002,7 @@ ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
 
 Here's [some node](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
-    let graph = Graph::new();
+    let graph = Graph::new(HashMap::new());
     graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
@@ -1124,7 +1125,7 @@ ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
 
 Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
-    let graph = Graph::new();
+    let graph = Graph::new(HashMap::new());
     graph
         .process_fs_patch(GraphPatch {
             renames: Vec::new(),
@@ -1312,4 +1313,130 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1). And here's [some fil
         }
     );
     assert!(file_2_data.backlinks.is_empty());
+}
+
+#[tokio::test]
+async fn indices_should_work() {
+    setup_config();
+
+    let file_1 = r#"---
+title: File 1
+---
+<!--PROPERTIES
+ID: 7097edb8-7a66-45fe-aec3-eb957f511ab0
+-->
+
+# Node 1 :hello:
+<!--PROPERTIES
+ID: 7097edb8-7a66-45fe-aec3-eb957f511ab1
+-->
+
+## Node 1.1
+<!--PROPERTIES
+ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
+-->
+
+This one doesn't have a special tag!
+"#;
+    let file_2 = r#"---
+title: File 2
+tags:
+    - hello
+---
+<!--PROPERTIES
+ID: 7097edb8-7a66-45fe-aec3-eb957f511ab3
+-->
+"#;
+
+    let graph = Graph::new(map! {
+        "special_tag".into() => Arc::new(|node: &StarlingNode| {
+            node.tags.contains(&"hello".into())
+        }) as Arc<dyn Fn(&StarlingNode) -> bool + Send + Sync>
+    });
+    graph
+        .process_fs_patch(GraphPatch {
+            renames: Vec::new(),
+            deletions: Vec::new(),
+            creations: vec![
+                PathPatch {
+                    path: PathBuf::from("file_1.md"),
+                    contents_res: Ok(file_1.into()),
+                },
+                PathPatch {
+                    path: PathBuf::from("file_2.md"),
+                    contents_res: Ok(file_2.into()),
+                },
+            ],
+            modifications: Vec::new(),
+        })
+        .await;
+
+    // We should initially see the nodes with the special tags in the index
+    assert_eq!(
+        graph.nodes(Some("special_tag"), Format::Markdown).await,
+        vec![
+            (
+                "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid(),
+                "Node 1".into(),
+                "file_1.md".into()
+            ),
+            (
+                "7097edb8-7a66-45fe-aec3-eb957f511ab3".uuid(),
+                "File 2".into(),
+                "file_2.md".into()
+            )
+        ]
+    );
+
+    graph
+        .process_fs_patch(GraphPatch {
+            renames: Vec::new(),
+            deletions: vec![PathBuf::from("file_2.md")],
+            creations: Vec::new(),
+            modifications: Vec::new(),
+        })
+        .await;
+    assert_eq!(
+        graph.nodes(Some("special_tag"), Format::Markdown).await,
+        vec![(
+            "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid(),
+            "Node 1".into(),
+            "file_1.md".into()
+        ),]
+    );
+
+    let file_1_updated = r#"---
+title: File 1
+---
+<!--PROPERTIES
+ID: 7097edb8-7a66-45fe-aec3-eb957f511ab0
+-->
+
+# Node 1
+<!--PROPERTIES
+ID: 7097edb8-7a66-45fe-aec3-eb957f511ab1
+-->
+
+## Node 1.1
+<!--PROPERTIES
+ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
+-->
+
+This one doesn't have a special tag!
+"#;
+    graph
+        .process_fs_patch(GraphPatch {
+            renames: Vec::new(),
+            deletions: Vec::new(),
+            creations: Vec::new(),
+            modifications: vec![PathPatch {
+                path: "file_1.md".into(),
+                contents_res: Ok(file_1_updated.into()),
+            }],
+        })
+        .await;
+    assert_eq!(
+        graph.nodes(Some("special_tag"), Format::Markdown).await,
+        Vec::new()
+    );
 }

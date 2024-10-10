@@ -1,4 +1,4 @@
-use crate::graph::GraphUpdate;
+use crate::graph::{GraphUpdate, IndexCriteria};
 use crate::{config::STARLING_CONFIG, connection::ConnectedDocument, error::PathParseError};
 use orgish::{Document, ForceUuidId, Format, Keyword, Node as OrgishNode};
 use serde::Deserialize;
@@ -33,6 +33,7 @@ impl PathNode {
     pub fn new(
         path: PathBuf,
         contents_res: Result<String, std::io::Error>,
+        index_checkers: &Vec<(IndexCriteria, String)>,
     ) -> (PathNode, Vec<GraphUpdate>) {
         // This is an invalid state (both `None`s), but one will be fixed immediately by
         // `.update()`
@@ -42,7 +43,7 @@ impl PathNode {
             node_ids: HashSet::new(),
             error: None,
         };
-        let (path_node, updates) = dummy.update(path, contents_res);
+        let (path_node, updates) = dummy.update(path, contents_res, index_checkers);
         (path_node, updates)
     }
     /// Directly renames this [`PathNode`] to have a different path.
@@ -84,6 +85,14 @@ impl PathNode {
                     })
                 }
 
+                // Make sure this node is removed from all the indices which it was part of
+                for index_name in removed_node.indices() {
+                    updates.push(GraphUpdate::RemoveNodeFromIndex {
+                        id: *removed_node_id,
+                        index: index_name.clone(),
+                    });
+                }
+
                 // And then instruct the removal of the node entirely
                 updates.push(GraphUpdate::RemoveNode(*removed_node_id))
             }
@@ -106,6 +115,7 @@ impl PathNode {
         &self,
         path: PathBuf,
         contents_res: Result<String, std::io::Error>,
+        index_checkers: &Vec<(IndexCriteria, String)>,
     ) -> (PathNode, Vec<GraphUpdate>) {
         let mut new_self = PathNode {
             path: path.clone(),
@@ -123,7 +133,7 @@ impl PathNode {
                     Format::Markdown
                 };
 
-                match self._update(&mut new_self, path, contents, format) {
+                match self._update(&mut new_self, path, contents, index_checkers, format) {
                     Ok(updates) => {
                         new_self.error = None;
                         (new_self, updates)
@@ -221,6 +231,7 @@ impl PathNode {
         new_self: &mut PathNode,
         path: PathBuf,
         contents: String,
+        index_checkers: &Vec<(IndexCriteria, String)>,
         format: Format,
     ) -> Result<Vec<GraphUpdate>, PathParseError> {
         // Parse as a basic document first
@@ -329,8 +340,9 @@ impl PathNode {
         let mut node_ids = HashSet::new();
         traverse(&document.root, valid_tags, path.clone(), &mut node_ids)?;
 
-        // Parse connections for the whole document
-        let mut connected_doc = ConnectedDocument::from_document(document, format);
+        // Parse connections for the whole document (this will also check which indices each node
+        // is in)
+        let mut connected_doc = ConnectedDocument::from_document(document, index_checkers, format);
 
         // If we're updating from a previous version of the document, we should transfer connection
         // information over (i.e. retained connections that were originally valid should remain
@@ -368,6 +380,14 @@ impl PathNode {
                     })
                 }
 
+                // Make sure this node is removed from all the indices which it was part of
+                for index_name in removed_node.indices() {
+                    updates.push(GraphUpdate::RemoveNodeFromIndex {
+                        id: *removed_node_id,
+                        index: index_name.clone(),
+                    });
+                }
+
                 // And then instruct the removal of the node entirely
                 updates.push(GraphUpdate::RemoveNode(*removed_node_id));
             }
@@ -380,11 +400,20 @@ impl PathNode {
                 // We'll need to check all of this node's connections, they're all new (no point in
                 // using info from other nodes in this tree to check validity, we'll need to create
                 // backlinks anyway)
-                for conn in connected_doc.root.node(new_node_id).unwrap().connections() {
+                let new_node = connected_doc.root.node(new_node_id).unwrap();
+                for conn in new_node.connections() {
                     updates.push(GraphUpdate::CheckConnection {
                         from: *new_node_id,
                         to: conn.id(),
                     })
+                }
+                // Add this node to any indices which it qualifies for
+                for index_name in new_node.indices() {
+                    updates.push(GraphUpdate::AddNodeToIndex {
+                        id: *new_node_id,
+                        path: path.clone(),
+                        index: index_name.clone(),
+                    });
                 }
             }
             for retained_node_id in node_ids.intersection(&self.node_ids) {
@@ -463,6 +492,25 @@ impl PathNode {
                         });
                     }
                 }
+
+                // Finally, see if the indices this node qualifies for have changed (the ones that
+                // have stayed the same can just be left as they are, the only thing that would
+                // change them are renames, and those are handled separately)
+                let old_indices = old_node.indices();
+                let new_indices = new_node.indices();
+                for removed_index_name in old_indices.difference(new_indices) {
+                    updates.push(GraphUpdate::RemoveNodeFromIndex {
+                        id: *retained_node_id,
+                        index: removed_index_name.clone(),
+                    });
+                }
+                for added_index_name in new_indices.difference(old_indices) {
+                    updates.push(GraphUpdate::AddNodeToIndex {
+                        id: *retained_node_id,
+                        path: path.clone(),
+                        index: added_index_name.clone(),
+                    });
+                }
             }
         } else {
             // This is the first version of the document, we'll issue node adding and connection
@@ -473,7 +521,15 @@ impl PathNode {
                     id: *node_id,
                     path: path.clone(),
                 });
-                for conn in connected_doc.root.node(node_id).unwrap().connections() {
+                let node = connected_doc.root.node(node_id).unwrap();
+                for index_name in node.indices() {
+                    updates.push(GraphUpdate::AddNodeToIndex {
+                        id: *node_id,
+                        path: path.clone(),
+                        index: index_name.clone(),
+                    });
+                }
+                for conn in node.connections() {
                     updates.push(GraphUpdate::CheckConnection {
                         from: *node_id,
                         to: conn.id(),

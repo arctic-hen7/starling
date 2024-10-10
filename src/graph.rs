@@ -1,14 +1,16 @@
 use crate::conflict_detector::{Conflict, Write, WriteSource};
+use crate::path_node::StarlingNode;
 use crate::{debouncer::DebouncedEvents, patch::GraphPatch, path_node::PathNode};
 use futures::future::join;
 use futures::future::join_all;
 use futures::future::OptionFuture;
 use orgish::Format;
+use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockWriteGuard};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -33,6 +35,15 @@ pub enum GraphUpdate {
     /// the node from the map of all nodes (i.e. connections will *not* be handled, and separate
     /// [`GraphUpdate::RemoveBacklink`] instructions will probably be needed).
     RemoveNode(Uuid),
+    /// The provided node should be added to the index with the given name. This will not create
+    /// any connection checking instructions or the like.
+    AddNodeToIndex {
+        id: Uuid,
+        path: PathBuf,
+        index: String,
+    },
+    /// The node with the given ID should be removed from the index with the given name.
+    RemoveNodeFromIndex { id: Uuid, index: String },
     /// We should remove the backlink on the node with the given ID from the node with the given
     /// ID. This will be because either there is no longer a connection to it, or because the
     /// source vertex has been removed.
@@ -67,6 +78,12 @@ impl std::fmt::Debug for GraphUpdate {
             GraphUpdate::DeletePathNode(path) => write!(f, "DeletePathNode({:?})", path),
             GraphUpdate::AddNode { id, path } => write!(f, "AddNode({:?}, {:?})", id, path),
             GraphUpdate::RemoveNode(id) => write!(f, "RemoveNode({:?})", id),
+            GraphUpdate::AddNodeToIndex { id, path, index } => {
+                write!(f, "AddNodeToIndex({:?}, {:?}, {:?})", id, path, index)
+            }
+            GraphUpdate::RemoveNodeFromIndex { id, index } => {
+                write!(f, "RemoveNodeFromIndex({:?}, {:?})", id, index)
+            }
             GraphUpdate::RemoveBacklink { on, from } => {
                 write!(f, "RemoveBacklink({:?}, {:?})", on, from)
             }
@@ -84,6 +101,108 @@ type NodeMap = HashMap<Uuid, PathBuf>;
 type PathMap = HashMap<PathBuf, RwLock<PathNode>>;
 type InvalidConnectionsMap = HashMap<Uuid, HashSet<Uuid>>;
 
+pub(crate) struct IndexMap {
+    /// An alphabetically-ordered map of the actual index data.
+    inner: Vec<Index>,
+    /// A map to the indices in the above vector for lookup.
+    map: HashMap<String, usize>,
+}
+impl IndexMap {
+    fn new(indices: HashMap<String, IndexCriteria>) -> Self {
+        let mut inner = Vec::new();
+        let mut map = HashMap::new();
+
+        let mut names = Vec::new();
+        for name in indices.keys() {
+            names.push(name.clone());
+        }
+        // Fine to do an unstable sort, duplicates are impossible
+        names.sort_unstable();
+        for name in names {
+            let index = Index {
+                nodes: RwLock::new(HashMap::new()),
+                criteria: indices[&name].clone(),
+            };
+            map.insert(name, inner.len());
+            inner.push(index);
+        }
+
+        Self { inner, map }
+    }
+    fn get(&self, name: &str) -> Option<&Index> {
+        self.map.get(name).map(|i| &self.inner[*i])
+    }
+    fn remove(&mut self, name: &str) -> Option<Index> {
+        self.map.remove(name).map(|i| self.inner.remove(i))
+    }
+    async fn write_all(&self) -> HashMap<&String, RwLockWriteGuard<NodeMap>> {
+        // Use the ordering of `self.inner` to lock in order
+        let mut locks = Vec::new();
+        for index in &self.inner {
+            locks.push(Some(index.nodes.write().await));
+        }
+
+        let mut locks_map = HashMap::new();
+        for (name, idx) in self.map.iter() {
+            locks_map.insert(name, locks[*idx].take().unwrap());
+        }
+
+        locks_map
+    }
+    async fn write_some(
+        &self,
+        names: HashSet<String>,
+    ) -> HashMap<&String, RwLockWriteGuard<NodeMap>> {
+        let mut indices_to_lock = HashSet::new();
+        for (name, idx) in self.map.iter() {
+            if names.contains(name) {
+                indices_to_lock.insert(*idx);
+            }
+        }
+
+        // Use the ordering of `self.inner` to lock in order
+        let mut locks = Vec::new();
+        for (idx, index) /* SCREAM */ in self.inner.iter().enumerate() {
+            if indices_to_lock.contains(&idx) {
+                locks.push(Some(index.nodes.write().await));
+            }
+        }
+
+        let mut locks_map = HashMap::new();
+        for (name, idx) in self.map.iter() {
+            if indices_to_lock.contains(idx) {
+                locks_map.insert(name, locks[*idx].take().unwrap());
+            }
+        }
+
+        locks_map
+    }
+    fn criteria(&self) -> HashMap<String, IndexCriteria> {
+        self.map
+            .iter()
+            .map(|(name, idx)| (name.clone(), self.inner[*idx].criteria.clone()))
+            .collect()
+    }
+    fn checkers(&self) -> Vec<(IndexCriteria, String)> {
+        self.map
+            .iter()
+            .map(|(name, idx)| (self.inner[*idx].criteria.clone(), name.clone()))
+            .collect()
+    }
+    pub(crate) fn names(&self) -> impl Iterator<Item = &String> {
+        self.map.keys()
+    }
+}
+
+/// A single *index*, which holds a subset of the total nodes map, indexed by some criteria. The
+/// map of nodes that an index holds includes values for the paths, allowing the same indexing
+/// speed as if one were using the full map.
+pub(crate) struct Index {
+    nodes: RwLock<NodeMap>,
+    criteria: IndexCriteria,
+}
+pub type IndexCriteria = Arc<dyn Fn(&StarlingNode) -> bool + Send + Sync>;
+
 /// A graph of many nodes derived from Org/Markdown files ([`PathNode`]s), which are connected
 /// together.
 pub struct Graph {
@@ -92,25 +211,35 @@ pub struct Graph {
     ///
     /// If maps are to be locked, this must always be locked first.
     pub(crate) nodes: RwLock<NodeMap>,
+    /// A map of indices. The user can create arbitrary indices (with arbitrary names) to index
+    /// subsets of the nodes map by certain criteria, allowing the implementation of all sorts
+    /// of faster search mechanisms over subsets of the graph.
+    ///
+    /// Indices cannot be modified once the graph has been created. However, the inner node maps of
+    /// each index must be locked in alphabetical order on the index names, and such locking must
+    /// be done second.
+    pub(crate) indices: IndexMap,
     /// All the paths in the graph, indexed by their (relative) paths. On a rename, an entry will
     /// be removed and recreated here. All the node IDs on a path are guaranteed to exist in the
     /// nodes map and point back to this path.
     ///
-    /// If maps are to be locked, this must always be locked second. If individual paths are to be
+    /// If maps are to be locked, this must always be locked third. If individual paths are to be
     /// locked, they should be locked sorted in path order to prevent deadlocks.
     pub(crate) paths: RwLock<PathMap>,
     /// A list of invalid connections, indexed by the invalid ID they connected to, and listing in
     /// each entry the set of nodes which made such a connection, by their IDs.
     ///
-    /// If maps are to be locked, this must always be locked third.
+    /// If maps are to be locked, this must always be locked fourth.
     pub(crate) invalid_connections: RwLock<InvalidConnectionsMap>,
 }
 impl Graph {
     /// Creates a new, completely empty graph. Typically, [`Self::from_dir`] would be used to
-    /// initially populate the graph from a directory.
-    pub fn new() -> Self {
+    /// initially populate the graph from a directory. This also takes a series of indices and
+    /// their properties.
+    pub fn new(indices: HashMap<String, IndexCriteria>) -> Self {
         Self {
             nodes: RwLock::new(HashMap::new()),
+            indices: IndexMap::new(indices),
             paths: RwLock::new(HashMap::new()),
             invalid_connections: RwLock::new(HashMap::new()),
         }
@@ -144,14 +273,17 @@ impl Graph {
     /// # Panics
     ///
     /// This will panic if the provided path is not a valid directory.
-    pub async fn from_dir(dir: &Path) -> (Self, Vec<Write>) {
+    pub async fn from_dir(
+        dir: &Path,
+        indices: HashMap<String, IndexCriteria>,
+    ) -> (Self, Vec<Write>) {
         assert!(dir.is_dir());
 
         // Fake creation events recursively for everything in the directory
         let creations = DebouncedEvents::start_from_dir(dir);
         let patch = GraphPatch::from_events(creations, dir).await;
 
-        let this = Self::new();
+        let this = Self::new(indices);
         let writes = this.process_fs_patch(patch).await;
 
         (this, writes)
@@ -162,21 +294,43 @@ impl Graph {
     #[tracing::instrument(skip(self))]
     pub async fn rescan(&mut self, dir: &Path) -> Vec<Write> {
         let mut nodes = self.nodes.write().await;
+        let index_locks = self.indices.write_all().await;
         let mut paths = self.paths.write().await;
         let mut invalid_connections = self.invalid_connections.write().await;
 
-        let (new_graph, writes) = Self::from_dir(dir).await;
+        let (mut new_graph, writes) = Self::from_dir(dir, self.indices.criteria()).await;
         *nodes = new_graph.nodes.into_inner();
         *paths = new_graph.paths.into_inner();
         *invalid_connections = new_graph.invalid_connections.into_inner();
 
+        // Update each index in order (the new graph is guaranteed to have the same indices)
+        for (index_name, mut index_map) in index_locks {
+            *index_map = new_graph
+                .indices
+                .remove(index_name)
+                .unwrap()
+                .nodes
+                .into_inner();
+        }
+
         writes
     }
-    /// Gets a list of all nodes in the system, with their titles and the paths from which they
-    /// came. This takes a format for links in titles.
+    /// Gets a list of all the nodes in the given index (or across the whole system if the index is
+    /// `None`), with their titles and the paths from which they came. This takes a format for
+    /// links in title.s
     #[tracing::instrument(skip(self))]
-    pub async fn nodes(&self, format: Format) -> Vec<(Uuid, String, PathBuf)> {
-        let nodes = self.nodes.read().await;
+    pub async fn nodes(&self, index: Option<&str>, format: Format) -> Vec<(Uuid, String, PathBuf)> {
+        let nodes = if let Some(index_name) = index {
+            self.indices
+                .get(index_name)
+                .as_ref()
+                .unwrap()
+                .nodes
+                .read()
+                .await
+        } else {
+            self.nodes.read().await
+        };
         let paths = self.paths.read().await;
 
         let mut entries = nodes
@@ -207,6 +361,9 @@ impl Graph {
     #[tracing::instrument(skip_all)]
     pub async fn process_fs_patch(&self, patch: GraphPatch) -> Vec<Write> {
         info!("about to process patch {:?}", patch);
+        // Create a list of the index criteria to send to the processing path for each node
+        let index_checkers = self.indices.checkers();
+
         // Start with renames (they have to be fully executed before anything else so the right
         // paths are in the map for everything else)
         self.process_renames(patch.renames).await;
@@ -218,7 +375,7 @@ impl Graph {
         let paths = self.paths.read().await;
         for path_patch in patch.creations {
             let (path_node, mut updates_l) =
-                PathNode::new(path_patch.path, path_patch.contents_res);
+                PathNode::new(path_patch.path, path_patch.contents_res, &index_checkers);
             updates_l.push(GraphUpdate::CreatePathNode(path_node));
             creation_updates.push(updates_l);
         }
@@ -240,8 +397,11 @@ impl Graph {
             if let Some(path_node) = paths.get(&path_patch.path) {
                 modification_futs.push(async {
                     let path_node = path_node.read().await;
-                    let (new_path_node, mut updates_l) =
-                        path_node.update(path_patch.path.clone(), path_patch.contents_res);
+                    let (new_path_node, mut updates_l) = path_node.update(
+                        path_patch.path.clone(),
+                        path_patch.contents_res,
+                        &index_checkers,
+                    );
                     updates_l.push(GraphUpdate::ModifyPathNode {
                         // We use the old path in case the new one has changed
                         path: path_patch.path,
@@ -257,7 +417,7 @@ impl Graph {
                 );
 
                 let (path_node, mut updates_l) =
-                    PathNode::new(path_patch.path, path_patch.contents_res);
+                    PathNode::new(path_patch.path, path_patch.contents_res, &index_checkers);
                 updates_l.push(GraphUpdate::CreatePathNode(path_node));
                 creation_updates.push(updates_l);
             }
@@ -290,6 +450,7 @@ impl Graph {
         }
 
         let mut nodes = self.nodes.write().await;
+        let mut indices = self.indices.write_all().await;
         let mut paths = self.paths.write().await;
         debug!("maps locked for renaming");
         for (from, to) in renames {
@@ -303,6 +464,12 @@ impl Graph {
                 for node_id in path_node_ref.ids() {
                     let node_path = nodes.get_mut(node_id).unwrap();
                     *node_path = to.clone();
+                    // Including in all the indices
+                    for index_map in indices.values_mut() {
+                        if let Some(node_path) = index_map.get_mut(node_id) {
+                            *node_path = to.clone();
+                        }
+                    }
                 }
                 drop(path_node_ref);
 
@@ -320,6 +487,7 @@ impl Graph {
         let mut should_lock_nodes = false;
         let mut should_lock_paths = false;
         let mut should_lock_invalid_connections = false;
+        let mut indices_to_lock = HashSet::new();
         // These are the IDs of nodes whose paths we'll need to lock (but not all of them will be
         // entered into the nodes map until after stage 1). If any of them don't exist, they'll be
         // from `GraphUpdate::CheckConnection`, so it's fine if they aren't available.
@@ -376,6 +544,18 @@ impl Graph {
                     map_updates.push(update);
                     debug!("will lock `nodes` for node removal");
                 }
+                GraphUpdate::AddNodeToIndex { id, ref path, ref index } => {
+                    // We'll need to lock the index map to add the node to it
+                    indices_to_lock.insert(index.clone());
+                    debug!("will lock index {index} to add node {id} in {path:?}");
+                    map_updates.push(update);
+                }
+                GraphUpdate::RemoveNodeFromIndex { id, ref index } => {
+                    // We'll need to lock the index map to remove the node from it
+                    indices_to_lock.insert(index.clone());
+                    debug!("will lock index {index} to remove node {id}");
+                    map_updates.push(update);
+                }
                 GraphUpdate::RemoveInvalidConnection { from, to } => {
                     map_updates.push(update);
                     should_lock_invalid_connections = true;
@@ -408,6 +588,7 @@ impl Graph {
 
         // Lock all the maps we need, in the global locking order
         let mut nodes = OptionFuture::from(should_lock_nodes.then(|| self.nodes.write())).await;
+        let mut index_maps = self.indices.write_some(indices_to_lock).await;
         let mut paths = OptionFuture::from(should_lock_paths.then(|| self.paths.write())).await;
         let mut invalid_connections = OptionFuture::from(
             should_lock_invalid_connections.then(|| self.invalid_connections.write()),
@@ -508,6 +689,28 @@ impl Graph {
                         debug!("tried to remove node {node_id} that wasn't in the graph");
                     }
                 }
+                GraphUpdate::AddNodeToIndex { id, path, index } => {
+                    let index_map = index_maps.get_mut(&index).unwrap();
+                    if index_map.contains_key(&id) {
+                        // Unlike adding a general node to the graph, it's no indicator of
+                        // something having gone wrong if we try to add something to an index twice
+                        debug!("tried to add node {id} in {path:?} to index {index} that was already present in the graph");
+                    }
+
+                    index_map.insert(id, path.clone());
+                    debug!("added node {id} in {path:?} to index {index}");
+                }
+                GraphUpdate::RemoveNodeFromIndex { id, index } => {
+                    let index_map = index_maps.get_mut(&index).unwrap();
+                    let removed = index_map.remove(&id);
+                    if removed.is_some() {
+                        debug!("removed node {id} from index {index}");
+                    } else {
+                        debug!(
+                            "tried to remove node {id} from index {index} that wasn't in the graph"
+                        );
+                    }
+                }
                 GraphUpdate::RemoveInvalidConnection { from, to } => {
                     if let Some(invalid_referrers) =
                         invalid_connections.as_mut().unwrap().get_mut(&from)
@@ -527,6 +730,8 @@ impl Graph {
             }
         }
 
+        // We're guaranteed not to need the indices anymore
+        drop(index_maps);
         // We'll need to map from node IDs to paths to figure out which paths to lock, but we won't
         // need to change anything about this relation, so it's fine to have `nodes` as a read
         // guard

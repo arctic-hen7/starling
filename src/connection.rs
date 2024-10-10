@@ -1,5 +1,6 @@
 use crate::{
     config::STARLING_CONFIG,
+    graph::IndexCriteria,
     path_node::{StarlingDocument, StarlingNode},
 };
 use orgish::Format;
@@ -360,14 +361,21 @@ pub struct SingleConnectedNode {
     /// This will contain an exhaustive list of all the nodes which link to this one, and no
     /// others.
     backlinks: HashSet<Uuid>,
+    /// The names of the indices in which this node is present. We need to keep track of this so
+    /// modifications can be made to the overall graph without locking index maps unnecessarily.
+    indices: HashSet<String>,
 }
 impl SingleConnectedNode {
     /// Creates a new [`SingleConnectedNode`] from the given strings for a title and body. This
     /// will start with no backlinks.
+    ///
+    /// This takes the indices which this node is known to be a part of, simply because this is a
+    /// good structure to record them on.
     fn new(
         title_str: String,
         body_str: Option<String>,
         position: Vec<usize>,
+        indices: HashSet<String>,
         format: Format,
     ) -> Self {
         let (title, mut title_map) = ConnectedString::from_str(&title_str, format);
@@ -407,6 +415,7 @@ impl SingleConnectedNode {
                 connections: title_map,
                 position,
                 backlinks: HashSet::new(),
+                indices,
             }
         } else {
             // Simple case, no map combination needed
@@ -416,6 +425,7 @@ impl SingleConnectedNode {
                 connections: title_map,
                 position,
                 backlinks: HashSet::new(),
+                indices,
             }
         }
     }
@@ -479,6 +489,9 @@ impl SingleConnectedNode {
     pub fn body(&self, format: Format) -> Option<String> {
         Some(self.body.as_ref()?.to_string(&self.connections, format))
     }
+    pub fn indices(&self) -> &HashSet<String> {
+        &self.indices
+    }
 }
 
 /// A [`StarlingNode`] which contains parsed connections in its title and/or body.
@@ -495,20 +508,37 @@ pub struct ConnectedNode {
 impl ConnectedNode {
     /// Parses the provided node into a connected node by tokenising its title and body (if
     /// present).
-    fn from_node(mut node: StarlingNode, format: Format) -> Self {
+    fn from_node(
+        mut node: StarlingNode,
+        index_checkers: &Vec<(IndexCriteria, String)>,
+        format: Format,
+    ) -> Self {
         // Parse through all the nodes recursively (recording the positions for later indexing)
         fn tokenise_tree(
             node: &mut StarlingNode,
             format: Format,
             nodes: &mut HashMap<Uuid, SingleConnectedNode>,
             position: Vec<usize>,
+            index_checkers: &Vec<(IndexCriteria, String)>,
         ) {
+            // Check which indices this node is a part of (before we extract its title and body)
+            let indices = index_checkers
+                .iter()
+                .filter_map(|(criteria, name)| {
+                    if criteria(node) {
+                        Some(name.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // Parse the title and body as connected strings, scrubbing them out of the original
             // `node`
             let connected_node = SingleConnectedNode::new(
                 std::mem::take(&mut node.title),
                 node.body.take(),
                 position.clone(),
+                indices,
                 format,
             );
             let id = *node.properties.id;
@@ -518,11 +548,11 @@ impl ConnectedNode {
             for (idx, child) in node.unchecked_mut_children().iter_mut().enumerate() {
                 let mut child_pos = position.clone();
                 child_pos.push(idx);
-                tokenise_tree(child, format, nodes, child_pos);
+                tokenise_tree(child, format, nodes, child_pos, index_checkers);
             }
         }
         let mut map = HashMap::new();
-        tokenise_tree(&mut node, format, &mut map, Vec::new());
+        tokenise_tree(&mut node, format, &mut map, Vec::new(), index_checkers);
 
         Self { node, map }
     }
@@ -643,9 +673,13 @@ pub struct ConnectedDocument {
 impl ConnectedDocument {
     /// Parses the provided document into a connected document by tokenising its title and body (if
     /// present).
-    pub fn from_document(document: StarlingDocument, format: Format) -> Self {
+    pub fn from_document(
+        document: StarlingDocument,
+        index_checkers: &Vec<(IndexCriteria, String)>,
+        format: Format,
+    ) -> Self {
         Self {
-            root: ConnectedNode::from_node(document.root, format),
+            root: ConnectedNode::from_node(document.root, index_checkers, format),
             attributes: document.attributes,
         }
     }
