@@ -1,8 +1,10 @@
 use config::{Config, STARLING_CONFIG};
 use error::Error;
 use fs_engine::FsEngine;
-use graph::Graph;
+use graph::{Graph, IndexCriteria};
 use logging::setup_logging;
+use orgish::Keyword;
+use path_node::StarlingNode;
 use server::make_app;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
@@ -50,8 +52,26 @@ async fn core() -> Result<(), Error> {
     STARLING_CONFIG.set(Config::from_dir(&dir)?);
     setup_logging();
 
+    let mut indices: HashMap<String, IndexCriteria> = HashMap::new();
+    indices.insert(
+        "action_items".to_string(),
+        Arc::new(|node| {
+            let config = STARLING_CONFIG.get();
+            let has_action_keyword = node
+                .keyword
+                .as_ref()
+                .is_some_and(|k| config.action_keywords.contains(&k.clone().into_string()));
+            let has_active_ts = node.timestamps.iter().any(|ts| ts.active);
+            let has_deadline = node.planning.deadline.as_ref().is_some_and(|ts| ts.active);
+            let has_scheduled = node.planning.scheduled.as_ref().is_some_and(|ts| ts.active);
+            let has_closed = node.planning.closed.as_ref().is_some_and(|ts| ts.active);
+
+            has_action_keyword || has_active_ts || has_deadline || has_scheduled || has_closed
+        }),
+    );
+
     // Any errors on each path would be accumulated into each path, so this can't fail
-    let (graph, initial_writes) = Graph::from_dir(&dir, HashMap::new()).await;
+    let (graph, initial_writes) = Graph::from_dir(&dir, indices).await;
     let graph = Arc::new(graph);
 
     // Start up the filesystem processing engine and let it run forever
