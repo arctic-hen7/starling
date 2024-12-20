@@ -10,7 +10,7 @@ directories = "5.0.1"
 futures = "0.3.30"
 # This makes `notify` play well with `tokio`
 notify = { version = "6.1.1", default-features = false, features = [ "macos_fsevent" ] }
-orgish = { version = "0.1", path = "../../orgish/orgish/packages/orgish", features = [ "serde" ] }
+orgish = { version = "0.1", git = "https://github.com/arctic-hen7/orgish", features = [ "serde" ] }
 parking_lot = "0.12.3"
 serde = { version = "1.0.208", features = ["derive"] }
 serde_yaml = "0.9.34"

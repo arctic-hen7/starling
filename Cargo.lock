@@ -740,6 +740,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "orgish"
 version = "0.1.0"
+source = "git+https://github.com/arctic-hen7/orgish#24a2856f23fa08ff30aaf8c712768b18d41de814"
 dependencies = [
  "chrono",
  "serde",
