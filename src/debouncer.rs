@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::config::STARLING_CONFIG;
+
 /// Some kind of filesystem update to a single path.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Event {
@@ -126,8 +128,16 @@ impl DebouncedEvents {
         debounced
     }
     /// Creates a [`DebouncedEvents`] object of creation events from all the readable paths in a
-    /// directory. This will skip paths which cannot be read.
+    /// directory. This will skip paths which cannot be read, as well as those in the configured
+    /// exclusion list.
     pub fn start_from_dir(dir: &Path) -> Self {
+        let exclude = STARLING_CONFIG
+            .get()
+            .exclude_paths
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+
         Self {
             inner: WalkDir::new(dir)
                 .into_iter()
@@ -140,6 +150,8 @@ impl DebouncedEvents {
                     event.decanonicalize(dir);
                     (event.path().to_path_buf(), (None, Some(event)))
                 })
+                // Filter according to the *relative* exclusion list after decanonicalization
+                .filter(|(path, _)| !exclude.iter().any(|ex| path.starts_with(ex)))
                 .collect(),
         }
     }

@@ -124,6 +124,9 @@ pub struct Config {
     /// The port to serve the Starling server on.
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Any paths to exclude, expressed relative to the root directory.
+    #[serde(default = "Vec::new")]
+    pub exclude_paths: Vec<String>,
 }
 
 impl Default for Config {
@@ -137,6 +140,7 @@ impl Default for Config {
             host: default_host(),
             port: default_port(),
             log_directory: None,
+            exclude_paths: Vec::new(),
         }
     }
 }

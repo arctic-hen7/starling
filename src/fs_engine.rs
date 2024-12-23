@@ -132,6 +132,14 @@ impl FsEngine {
         // If watching the directory fails, we'll error before the future so the user can handle
         // this immediately
         watcher.watch(&dir, RecursiveMode::Recursive)?;
+        // Now unwatch all the exclusion paths
+        for path in &STARLING_CONFIG.get().exclude_paths {
+            // It's fine for the exclusion path not to exist
+            if !dir.join(path).exists() {
+                continue;
+            }
+            watcher.unwatch(&dir.join(path))?;
+        }
 
         Ok(async move {
             self.watcher = Some(watcher);
