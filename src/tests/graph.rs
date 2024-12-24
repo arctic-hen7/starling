@@ -20,6 +20,15 @@ impl<const B: usize> IntoHashSet for [&str; B] {
         self.iter().map(|s| s.to_string()).collect()
     }
 }
+/// Trait that allows [&str; _] to be converted to a `Vec<String>`.
+trait IntoVec {
+    fn into_v(self) -> Vec<String>;
+}
+impl<const B: usize> IntoVec for [&str; B] {
+    fn into_v(self) -> Vec<String> {
+        self.iter().map(|s| s.to_string()).collect()
+    }
+}
 /// Trait that infallibly converts `&str` to `Uuid`.
 trait IntoUuid {
     fn uuid(self) -> Uuid;
@@ -108,7 +117,7 @@ Here's a link to a [nonexistent node](6d93b936-5952-4707-89dd-69ca06c60854). But
 ID: 5d93b936-5952-4707-89dd-69ca06c60854
 -->
 
-Here's another link to [Node 1.1](5d93b936-5952-4707-89dd-69ca06c60852), using a different type, so it should be amalgamated in the child connections."#;
+Here's another link to [File 1/Node 1/Node 1.1](5d93b936-5952-4707-89dd-69ca06c60852), using a different type, so it should be amalgamated in the child connections."#;
 static FILE_2: &str = r#"---
 title: File 2
 tags:
@@ -118,7 +127,7 @@ tags:
 ID: 5d93b936-5952-4707-89dd-69ca06c60855
 -->
 
-We have a few links in the body of the root, like to [Node 1](5d93b936-5952-4707-89dd-69ca06c60851). We'll actually have another link there of a different type too: [Node 1](other:5d93b936-5952-4707-89dd-69ca06c60851).
+We have a few links in the body of the root, like to [File 1/Node 1](5d93b936-5952-4707-89dd-69ca06c60851). We'll actually have another link there of a different type too: [File 1/Node 1](other:5d93b936-5952-4707-89dd-69ca06c60851).
 
 # Node 2.1
 This deliberately doesn't have an ID."#;
@@ -153,7 +162,7 @@ async fn should_parse_connections_and_node_data() {
     assert_eq!(
         writes.get(&PathBuf::from("file_1.md")).unwrap(),
         &FILE_1
-            .replace("[this](other:", "[Node 1.1](other:")
+            .replace("[this](other:", "[File 1/Node 1/Node 1.1](other:")
             .replace("](5d", "](link:5d")
             // Invalid ID is still an ID
             .replace("](6d", "](link:6d")
@@ -193,7 +202,7 @@ async fn should_parse_connections_and_node_data() {
             .unwrap(),
         Node {
             id: "5d93b936-5952-4707-89dd-69ca06c60850".uuid(),
-            title: "File 1".into(),
+            title: ["File 1"].into_v(),
             path: PathBuf::from("file_1.md"),
             tags: ["hello", "world"].into_hs(),
             parent_tags: [].into(),
@@ -203,37 +212,37 @@ async fn should_parse_connections_and_node_data() {
             connections: map! {},
             backlinks: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
-                    title: "Node 1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1"].into_v(),
                     types: ["link"].into_hs()
                 }
             },
             child_connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60855".uuid() => NodeConnection {
-                    title: "File 2".into(),
+                    title: ["File 2"].into_v(),
                     types: ["link"].into_hs()
                 },
                 "5d93b936-5952-4707-89dd-69ca06c60850".uuid() => NodeConnection {
-                    title: "File 1".into(),
+                    title: ["File 1"].into_v(),
                     types: ["link"].into_hs()
                 },
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
-                    title: "Node 1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1"].into_v(),
                     // Types from connections across nodes get combined
                     types: ["link", "other"].into_hs()
                 }
             },
             child_backlinks: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60855".uuid() => NodeConnection {
-                    title: "File 2".into(),
+                    title: ["File 2"].into_v(),
                     types: ["link", "other"].into_hs()
                 },
                 "5d93b936-5952-4707-89dd-69ca06c60853".uuid() => NodeConnection {
-                    title: "Node 1.1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1", "Node 1.1.1"].into_v(),
                     // Invalid type `thing` doesn't get registered
                     types: ["other"].into_hs()
                 },
                 "5d93b936-5952-4707-89dd-69ca06c60854".uuid() => NodeConnection {
-                    title: "Node 2".into(),
+                    title: ["File 1", "Node 2"].into_v(),
                     types: ["link"].into_hs()
                 }
             }
@@ -250,7 +259,7 @@ async fn should_parse_connections_and_node_data() {
             .unwrap(),
         Node {
             id: "5d93b936-5952-4707-89dd-69ca06c60851".uuid(),
-            title: "Node 1".into(),
+            title: ["File 1", "Node 1"].into_v(),
             path: PathBuf::from("file_1.md"),
             tags: ["parent_tag"].into_hs(),
             parent_tags: ["hello", "world"].into_hs(),
@@ -259,34 +268,34 @@ async fn should_parse_connections_and_node_data() {
             body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60855".uuid() => NodeConnection {
-                    title: "File 2".into(),
+                    title: ["File 2"].into_v(),
                     types: ["link"].into_hs()
                 }
             },
             backlinks: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60855".uuid() => NodeConnection {
-                    title: "File 2".into(),
+                    title: ["File 2"].into_v(),
                     types: ["link", "other"].into_hs()
                 }
             },
             child_connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60850".uuid() => NodeConnection {
-                    title: "File 1".into(),
+                    title: ["File 1"].into_v(),
                     types: ["link"].into_hs()
                 },
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
-                    title: "Node 1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1"].into_v(),
                     types: ["other"].into_hs()
                 }
             },
             child_backlinks: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60853".uuid() => NodeConnection {
-                    title: "Node 1.1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1", "Node 1.1.1"].into_v(),
                     // Invalid type `thing` doesn't get registered
                     types: ["other"].into_hs()
                 },
                 "5d93b936-5952-4707-89dd-69ca06c60854".uuid() => NodeConnection {
-                    title: "Node 2".into(),
+                    title: ["File 1", "Node 2"].into_v(),
                     types: ["link"].into_hs()
                 }
             }
@@ -303,7 +312,7 @@ async fn should_parse_connections_and_node_data() {
             .unwrap(),
         Node {
             id: "5d93b936-5952-4707-89dd-69ca06c60852".uuid(),
-            title: "Node 1.1".into(),
+            title: ["File 1", "Node 1", "Node 1.1"].into_v(),
             path: PathBuf::from("file_1.md"),
             tags: [].into(),
             parent_tags: ["hello", "world", "parent_tag"].into_hs(),
@@ -312,24 +321,24 @@ async fn should_parse_connections_and_node_data() {
             body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60850".uuid() => NodeConnection {
-                    title: "File 1".into(),
+                    title: ["File 1"].into_v(),
                     types: ["link"].into_hs()
                 }
             },
             backlinks: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60853".uuid() => NodeConnection {
-                    title: "Node 1.1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1", "Node 1.1.1"].into_v(),
                     // Invalid type `thing` doesn't get registered
                     types: ["other"].into_hs()
                 },
                 "5d93b936-5952-4707-89dd-69ca06c60854".uuid() => NodeConnection {
-                    title: "Node 2".into(),
+                    title: ["File 1", "Node 2"].into_v(),
                     types: ["link"].into_hs()
                 }
             },
             child_connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
-                    title: "Node 1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1"].into_v(),
                     types: ["other"].into_hs()
                 }
             },
@@ -347,7 +356,7 @@ async fn should_parse_connections_and_node_data() {
             .unwrap(),
         Node {
             id: "5d93b936-5952-4707-89dd-69ca06c60853".uuid(),
-            title: "Node 1.1.1".into(),
+            title: ["File 1", "Node 1", "Node 1.1", "Node 1.1.1"].into_v(),
             path: PathBuf::from("file_1.md"),
             tags: ["child_tag"].into_hs(),
             parent_tags: ["hello", "world", "parent_tag"].into_hs(),
@@ -356,7 +365,7 @@ async fn should_parse_connections_and_node_data() {
             body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
-                    title: "Node 1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1"].into_v(),
                     types: ["other"].into_hs()
                 }
                 // Links with invalid types and UUIDs, along with URL connection, are not
@@ -378,7 +387,7 @@ async fn should_parse_connections_and_node_data() {
             .unwrap(),
         Node {
             id: "5d93b936-5952-4707-89dd-69ca06c60854".uuid(),
-            title: "Node 2".into(),
+            title: ["File 1", "Node 2"].into_v(),
             path: PathBuf::from("file_1.md"),
             tags: [].into_hs(),
             parent_tags: ["hello", "world"].into_hs(),
@@ -387,7 +396,7 @@ async fn should_parse_connections_and_node_data() {
             body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60852".uuid() => NodeConnection {
-                    title: "Node 1.1".into(),
+                    title: ["File 1", "Node 1", "Node 1.1"].into_v(),
                     types: ["link"].into_hs()
                 }
             },
@@ -407,7 +416,7 @@ async fn should_parse_connections_and_node_data() {
             .unwrap(),
         Node {
             id: "5d93b936-5952-4707-89dd-69ca06c60855".uuid(),
-            title: "File 2".into(),
+            title: ["File 2"].into_v(),
             path: PathBuf::from("file_2.md"),
             tags: ["foo"].into_hs(),
             parent_tags: [].into(),
@@ -416,13 +425,13 @@ async fn should_parse_connections_and_node_data() {
             body: None,
             connections: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60851".uuid() => NodeConnection {
-                    title: "Node 1".into(),
+                    title: ["File 1", "Node 1"].into_v(),
                     types: ["link", "other"].into_hs()
                 }
             },
             backlinks: map! {
                 "5d93b936-5952-4707-89dd-69ca06c60851".uuid() => NodeConnection {
-                    title: "Node 1".into(),
+                    title: ["File 1", "Node 1"].into_v(),
                     types: ["link"].into_hs()
                 }
             },
@@ -451,7 +460,7 @@ async fn should_parse_connections_and_node_data() {
         // The valid link gets a valid title (only other change is the default link type on the
         // nonexistent one)
         Some(r#"
-Here's a link to a [nonexistent node](link:6d93b936-5952-4707-89dd-69ca06c60854). But [Node 1.1](other:5d93b936-5952-4707-89dd-69ca06c60852) one should work, even though it's of a different type. Links like [this](https://example.com) won't be indexed, and ones with invalid types, [like this](thing:5d93b936-5952-4707-89dd-69ca06c60852), will be ignored.
+Here's a link to a [nonexistent node](link:6d93b936-5952-4707-89dd-69ca06c60854). But [File 1/Node 1/Node 1.1](other:5d93b936-5952-4707-89dd-69ca06c60852) one should work, even though it's of a different type. Links like [this](https://example.com) won't be indexed, and ones with invalid types, [like this](thing:5d93b936-5952-4707-89dd-69ca06c60852), will be ignored.
 "#.into())
     );
 }
@@ -608,7 +617,7 @@ This is a test file."#;
 title: File 2
 ---
 
-Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
+Here's [File 1/Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
     let graph = Graph::new(HashMap::new());
     graph
@@ -736,7 +745,7 @@ This is a test file."#;
 title: File 2
 ---
 
-Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
+Here's [File 1/Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
     let graph = Graph::new(HashMap::new());
     graph
@@ -804,7 +813,7 @@ title: File 2
 ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
 -->
 
-Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
+Here's [File 1/Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
     let graph = Graph::new(HashMap::new());
     graph
@@ -836,7 +845,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
             .unwrap()
             .backlinks,
         map! { "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid() => NodeConnection {
-            title: "Node 1".into(),
+            title: ["File 1", "Node 1"].into_v(),
             types: ["link"].into_hs()
         }}
     );
@@ -910,7 +919,7 @@ title: File 2
 ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
 -->
 
-Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
+Here's [File 1/Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
     let graph = Graph::new(HashMap::new());
     graph
@@ -942,7 +951,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
             .unwrap()
             .backlinks,
         map! { "7097edb8-7a66-45fe-aec3-eb957f511ab2".uuid() => NodeConnection {
-            title: "File 2".into(),
+            title: ["File 2"].into_v(),
             types: ["link"].into_hs()
         }}
     );
@@ -1060,7 +1069,7 @@ This is a test file. Here's [File 2](link:7097edb8-7a66-45fe-aec3-eb957f511ab2)"
     );
     assert_eq!(
         writes.get(&PathBuf::from("file_2.md")).unwrap(),
-        &file_2.replace("[some node]", "[Node 1]")
+        &file_2.replace("[some node]", "[File 1/Node 1]")
     );
 
     // There should be a valid connection on the new node and a backlink from it on file 2
@@ -1074,7 +1083,7 @@ This is a test file. Here's [File 2](link:7097edb8-7a66-45fe-aec3-eb957f511ab2)"
             .unwrap()
             .connections,
         map! { "7097edb8-7a66-45fe-aec3-eb957f511ab2".uuid() => NodeConnection {
-            title: "File 2".into(),
+            title: ["File 2"].into_v(),
             types: ["link"].into_hs()
         }}
     );
@@ -1088,7 +1097,7 @@ This is a test file. Here's [File 2](link:7097edb8-7a66-45fe-aec3-eb957f511ab2)"
             .unwrap()
             .backlinks,
         map! { "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid() => NodeConnection {
-            title: "Node 1".into(),
+            title: ["File 1", "Node 1"].into_v(),
             types: ["link"].into_hs()
         }}
     );
@@ -1123,7 +1132,7 @@ title: File 2
 ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
 -->
 
-Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
+Here's [File 1/Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
 
     let graph = Graph::new(HashMap::new());
     graph
@@ -1173,7 +1182,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
         node_1_data.connections,
         map! {
             "7097edb8-7a66-45fe-aec3-eb957f511ab2".uuid() => NodeConnection {
-                title: "File 2".into(),
+                title: ["File 2"].into_v(),
                 types: ["link"].into_hs()
             }
         }
@@ -1182,7 +1191,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
         node_1_data.backlinks,
         map! {
             "7097edb8-7a66-45fe-aec3-eb957f511ab2".uuid() => NodeConnection {
-                title: "File 2".into(),
+                title: ["File 2"].into_v(),
                 types: ["link"].into_hs()
             }
         }
@@ -1191,7 +1200,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
         file_2_data.connections,
         map! {
             "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid() => NodeConnection {
-                title: "Node 1".into(),
+                title: ["File 1", "Node 1"].into_v(),
                 types: ["link"].into_hs()
             }
         }
@@ -1200,7 +1209,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1)."#;
         file_2_data.backlinks,
         map! {
             "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid() => NodeConnection {
-                title: "Node 1".into(),
+                title: ["File 1", "Node 1"].into_v(),
                 types: ["link"].into_hs()
             }
         }
@@ -1226,7 +1235,7 @@ title: File 2
 ID: 7097edb8-7a66-45fe-aec3-eb957f511ab2
 -->
 
-Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1). And here's [some file](7097edb8-7a66-45fe-aec3-eb957f511ab0)."#;
+Here's [File 1/Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1). And here's [some file](7097edb8-7a66-45fe-aec3-eb957f511ab0)."#;
 
     let writes = graph
         .process_fs_patch(GraphPatch {
@@ -1283,7 +1292,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1). And here's [some fil
         file_1_data.backlinks,
         map! {
             "7097edb8-7a66-45fe-aec3-eb957f511ab2".uuid() => NodeConnection {
-                title: "File 2".into(),
+                title: ["File 2"].into_v(),
                 types: ["link"].into_hs()
             }
         }
@@ -1294,7 +1303,7 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1). And here's [some fil
         node_1_data.backlinks,
         map! {
             "7097edb8-7a66-45fe-aec3-eb957f511ab2".uuid() => NodeConnection {
-                title: "File 2".into(),
+                title: ["File 2"].into_v(),
                 types: ["link"].into_hs()
             }
         }
@@ -1303,11 +1312,11 @@ Here's [Node 1](link:7097edb8-7a66-45fe-aec3-eb957f511ab1). And here's [some fil
         file_2_data.connections,
         map! {
             "7097edb8-7a66-45fe-aec3-eb957f511ab0".uuid() => NodeConnection {
-                title: "File 1".into(),
+                title: ["File 1"].into_v(),
                 types: ["link"].into_hs()
             },
             "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid() => NodeConnection {
-                title: "Node 1".into(),
+                title: ["File 1", "Node 1"].into_v(),
                 types: ["link"].into_hs()
             }
         }
@@ -1377,12 +1386,12 @@ ID: 7097edb8-7a66-45fe-aec3-eb957f511ab3
         vec![
             (
                 "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid(),
-                "Node 1".into(),
+                ["File 1", "Node 1"].into_v(),
                 "file_1.md".into()
             ),
             (
                 "7097edb8-7a66-45fe-aec3-eb957f511ab3".uuid(),
-                "File 2".into(),
+                ["File 2"].into_v(),
                 "file_2.md".into()
             )
         ]
@@ -1400,7 +1409,7 @@ ID: 7097edb8-7a66-45fe-aec3-eb957f511ab3
         graph.nodes(Some("special_tag"), Format::Markdown).await,
         vec![(
             "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid(),
-            "Node 1".into(),
+            ["File 1", "Node 1"].into_v(),
             "file_1.md".into()
         ),]
     );

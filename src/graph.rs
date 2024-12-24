@@ -319,7 +319,11 @@ impl Graph {
     /// `None`), with their titles and the paths from which they came. This takes a format for
     /// links in title.s
     #[tracing::instrument(skip(self))]
-    pub async fn nodes(&self, index: Option<&str>, format: Format) -> Vec<(Uuid, String, PathBuf)> {
+    pub async fn nodes(
+        &self,
+        index: Option<&str>,
+        format: Format,
+    ) -> Vec<(Uuid, Vec<String>, PathBuf)> {
         let nodes = if let Some(index_name) = index {
             self.indices
                 .get(index_name)
@@ -825,7 +829,8 @@ impl Graph {
                                         Format::Markdown
                                     },
                                 )
-                                .unwrap();
+                                .unwrap()
+                                .join("/");
 
                             // And then validate the connection and update the title of the target
                             let path_node_from = path_nodes.get_mut(path_from).unwrap();

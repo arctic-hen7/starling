@@ -21,8 +21,8 @@ pub struct Node {
     // --- Basics ---
     /// The node's unique identifier.
     pub id: Uuid,
-    /// The title of this node.
-    pub title: String,
+    /// The title of this node and its parents.
+    pub title: Vec<String>,
     /// The path this node came from.
     pub path: PathBuf,
     /// The tags on this node itself. There will be no duplicates here.
@@ -107,7 +107,7 @@ pub struct NodeMetadata {
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct NodeConnection {
     /// The other node's raw title.
-    pub title: String,
+    pub title: Vec<String>,
     /// The types of the connection (one node can connect with another multiple times, this
     /// aggregates all the different types).
     pub types: HashSet<String>,
@@ -308,14 +308,14 @@ impl Graph {
                     } else {
                         path_refs.get(nodes.get(&conn.id()).unwrap()).unwrap()
                     };
-                    // We're guaranteed to have a document, because we have a connection to a node in
-                    // there
-                    let node = path_node.document().unwrap().root.node(&conn.id()).unwrap();
 
                     connections.insert(
                         conn.id(),
                         NodeConnection {
-                            title: node.title(options.conn_format),
+                            // title: node.title(options.conn_format),
+                            title: path_node
+                                .display_title(conn.id(), options.conn_format)
+                                .unwrap(),
                             types: conn.types().map(|s| s.to_string()).collect(),
                         },
                     );
@@ -340,7 +340,9 @@ impl Graph {
                 backlinks.insert(
                     *backlink_id,
                     NodeConnection {
-                        title: node.title(options.conn_format),
+                        title: path_node
+                            .display_title(*backlink_id, options.conn_format)
+                            .unwrap(),
                         // The types of connections the node made to us can be extracted by looking at
                         // the types of the connection to our node
                         types: node
@@ -397,7 +399,9 @@ impl Graph {
                                 child_connections
                                     .entry(conn.id())
                                     .or_insert_with(|| NodeConnection {
-                                        title: node.title(conn_format),
+                                        title: path_node
+                                            .display_title(conn.id(), conn_format)
+                                            .unwrap(),
                                         types: HashSet::new(),
                                     })
                                     .types
@@ -433,7 +437,9 @@ impl Graph {
                             child_backlinks
                                 .entry(*backlink_id)
                                 .or_insert_with(|| NodeConnection {
-                                    title: node.title(conn_format),
+                                    title: path_node
+                                        .display_title(*backlink_id, conn_format)
+                                        .unwrap(),
                                     types: HashSet::new(),
                                 })
                                 .types
@@ -471,7 +477,8 @@ impl Graph {
         // After this, all fine-grained and coarse-grained locks get safely dropped
         Some(Node {
             id: uuid,
-            title: connected_node.title(options.conn_format),
+            title: path_node.display_title(uuid, options.conn_format).unwrap(),
+            // title: connected_node.title(options.conn_format),
             path: node_path.clone(),
             tags: raw_node.tags.iter().cloned().collect(),
             parent_tags,

@@ -162,8 +162,23 @@ impl PathNode {
         self.path.clone()
     }
     /// Returns the display title of the node with the given ID in this path, if it exists.
-    pub fn display_title(&self, id: Uuid, conn_format: Format) -> Option<String> {
-        Some(self.document()?.root.node(&id)?.title(conn_format))
+    pub fn display_title(&self, id: Uuid, conn_format: Format) -> Option<Vec<String>> {
+        let root_node = &self.document()?.root;
+        let mut curr_node = root_node.scrubbed_node();
+        let target_node = root_node.node(&id)?;
+
+        let mut title = Vec::new();
+
+        let connected_node = root_node.node(&*curr_node.properties.id).unwrap();
+        title.push(connected_node.title(conn_format));
+        for idx in target_node.position() {
+            curr_node = &curr_node.children()[*idx];
+
+            let connected_node = root_node.node(&*curr_node.properties.id).unwrap();
+            title.push(connected_node.title(conn_format));
+        }
+
+        Some(title)
     }
     /// Gets an iterator of the IDs of all the nodes in this path.
     pub fn ids(&self) -> impl Iterator<Item = &Uuid> {
