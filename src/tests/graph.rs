@@ -1382,18 +1382,38 @@ ID: 7097edb8-7a66-45fe-aec3-eb957f511ab3
 
     // We should initially see the nodes with the special tags in the index
     assert_eq!(
-        graph.nodes(Some("special_tag"), Format::Markdown).await,
+        graph
+            .nodes(Some("special_tag"), NodeOptions::new(Format::Markdown))
+            .await,
         vec![
-            (
-                "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid(),
-                ["File 1", "Node 1"].into_v(),
-                "file_1.md".into()
-            ),
-            (
-                "7097edb8-7a66-45fe-aec3-eb957f511ab3".uuid(),
-                ["File 2"].into_v(),
-                "file_2.md".into()
-            )
+            Node {
+                id: "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid(),
+                title: ["File 1", "Node 1"].into_v(),
+                path: PathBuf::from("file_1.md"),
+                tags: ["hello"].into_hs(),
+                parent_tags: [].into(),
+                children: Vec::new(),
+                metadata: None,
+                body: None,
+                connections: map! {},
+                backlinks: map! {},
+                child_connections: map! {},
+                child_backlinks: map! {}
+            },
+            Node {
+                id: "7097edb8-7a66-45fe-aec3-eb957f511ab3".uuid(),
+                title: ["File 2"].into_v(),
+                path: PathBuf::from("file_2.md"),
+                tags: ["hello"].into_hs(),
+                parent_tags: [].into(),
+                children: Vec::new(),
+                metadata: None,
+                body: None,
+                connections: map! {},
+                backlinks: map! {},
+                child_connections: map! {},
+                child_backlinks: map! {}
+            },
         ]
     );
 
@@ -1406,12 +1426,23 @@ ID: 7097edb8-7a66-45fe-aec3-eb957f511ab3
         })
         .await;
     assert_eq!(
-        graph.nodes(Some("special_tag"), Format::Markdown).await,
-        vec![(
-            "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid(),
-            ["File 1", "Node 1"].into_v(),
-            "file_1.md".into()
-        ),]
+        graph
+            .nodes(Some("special_tag"), NodeOptions::new(Format::Markdown))
+            .await,
+        vec![Node {
+            id: "7097edb8-7a66-45fe-aec3-eb957f511ab1".uuid(),
+            title: ["File 1", "Node 1"].into_v(),
+            path: PathBuf::from("file_1.md"),
+            tags: ["hello"].into_hs(),
+            parent_tags: [].into(),
+            children: Vec::new(),
+            metadata: None,
+            body: None,
+            connections: map! {},
+            backlinks: map! {},
+            child_connections: map! {},
+            child_backlinks: map! {}
+        },]
     );
 
     let file_1_updated = r#"---
@@ -1445,7 +1476,9 @@ This one doesn't have a special tag!
         })
         .await;
     assert_eq!(
-        graph.nodes(Some("special_tag"), Format::Markdown).await,
+        graph
+            .nodes(Some("special_tag"), NodeOptions::new(Format::Markdown))
+            .await,
         Vec::new()
     );
 }

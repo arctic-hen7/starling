@@ -4,7 +4,6 @@ use fs_engine::FsEngine;
 use graph::{Graph, IndexCriteria};
 use logging::setup_logging;
 use orgish::Keyword;
-use path_node::StarlingNode;
 use server::make_app;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;

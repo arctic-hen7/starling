@@ -4,8 +4,6 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use orgish::Format;
-use serde::Deserialize;
 use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
 
@@ -35,8 +33,8 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
         .route(
             "/nodes",
             get(
-                |State(graph): State<Arc<Graph>>, Json(opts): Json<GetNodesOpts>| async move {
-                    let nodes = graph.nodes(None, opts.format).await;
+                |State(graph): State<Arc<Graph>>, Json(opts): Json<NodeOptions>| async move {
+                    let nodes = graph.nodes(None, opts).await;
                     Json(nodes)
                 },
             ),
@@ -76,8 +74,8 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
         router = router.route(
             &format!("/index/{}/nodes", index_name),
             get(
-                |State(graph): State<Arc<Graph>>, Json(opts): Json<GetNodesOpts>| async move {
-                    let nodes = graph.nodes(Some(&index_name), opts.format).await;
+                |State(graph): State<Arc<Graph>>, Json(opts): Json<NodeOptions>| async move {
+                    let nodes = graph.nodes(Some(&index_name), opts).await;
                     Json(nodes)
                 },
             ),
@@ -85,9 +83,4 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
     }
 
     router.with_state(graph)
-}
-
-#[derive(Deserialize)]
-struct GetNodesOpts {
-    format: Format,
 }

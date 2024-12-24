@@ -1,4 +1,5 @@
 use crate::conflict_detector::{Conflict, Write, WriteSource};
+use crate::node::{Node, NodeOptions};
 use crate::path_node::StarlingNode;
 use crate::{debouncer::DebouncedEvents, patch::GraphPatch, path_node::PathNode};
 use futures::future::join;
@@ -317,13 +318,9 @@ impl Graph {
     }
     /// Gets a list of all the nodes in the given index (or across the whole system if the index is
     /// `None`), with their titles and the paths from which they came. This takes a format for
-    /// links in title.s
+    /// links in titles.
     #[tracing::instrument(skip(self))]
-    pub async fn nodes(
-        &self,
-        index: Option<&str>,
-        format: Format,
-    ) -> Vec<(Uuid, Vec<String>, PathBuf)> {
+    pub async fn nodes(&self, index: Option<&str>, options: NodeOptions) -> Vec<Node> {
         let nodes = if let Some(index_name) = index {
             self.indices
                 .get(index_name)
@@ -335,24 +332,18 @@ impl Graph {
         } else {
             self.nodes.read().await
         };
-        let paths = self.paths.read().await;
 
-        let mut entries = nodes
-            .iter()
-            .map(|(id, path)| (*id, path.clone()))
-            .collect::<Vec<_>>();
-        // Sort by paths so we can lock in order
-        entries.sort_unstable_by_key(|entry| entry.1.clone());
-
-        let mut full_entries = Vec::new();
-        for (id, path) in entries {
-            // We got a valid node, which points to a guaranteed valid path, which is guaranteed to
-            // contain that node, so we can unwrap everything
-            let path_node = paths.get(&path).unwrap().read().await;
-            full_entries.push((id, path_node.display_title(id, format).unwrap(), path));
+        let mut full_nodes = Vec::new();
+        for id in nodes.keys() {
+            // A node listed in an index is guaranteed to exist
+            full_nodes.push(self.get_node(*id, options).await.unwrap());
         }
 
-        full_entries
+        // In testing, we need a reliable order
+        #[cfg(test)]
+        full_nodes.sort_by_key(|n| n.id);
+
+        full_nodes
     }
     /// Process a batch of updates from the filesystem. This operates as the start of a pipeline,
     /// generating modifications which in turn generate instructions for locking and graph updates.

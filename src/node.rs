@@ -114,7 +114,7 @@ pub struct NodeConnection {
 }
 
 /// Options that can be used to customize the information returned about a node.
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 pub struct NodeOptions {
     /// Whether or not to return the body of this node (this may be arbitrarily large).
     #[serde(default)]
@@ -385,8 +385,6 @@ impl Graph {
                                 };
                                 // We're guaranteed to have a document, because we have a connection to a node in
                                 // there
-                                let node =
-                                    path_node.document().unwrap().root.node(&conn.id()).unwrap();
                                 let types =
                                     conn.types().map(|s| s.to_string()).collect::<HashSet<_>>();
 
