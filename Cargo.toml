@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 axum = "0.7.6"
+chrono = "^0.4.35"
 crossbeam-queue = "0.3.11"
 directories = "5.0.1"
 futures = "0.3.30"

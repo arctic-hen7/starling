@@ -4,6 +4,8 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use chrono::NaiveDate;
+use orgish::Timestamp;
 use std::{path::PathBuf, sync::Arc};
 use uuid::Uuid;
 
@@ -67,6 +69,24 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
                 let cfg = STARLING_CONFIG.get();
                 Json(cfg.action_keywords.clone())
             }),
+        )
+        // --- Utility methods ---
+        .route(
+            "/utils/next-timestamp",
+            // Returns the next repeat of the given timestamp if there is one.
+            get(|Json(ts): Json<Timestamp>| async {
+                let next_ts = ts.into_next_repeat().ok();
+                Json(next_ts)
+            }),
+        )
+        .route(
+            "/utils/next-timestamp/:after",
+            get(
+                |Path(after): Path<NaiveDate>, Json(ts): Json<Timestamp>| async move {
+                    let next_ts = ts.into_next_repeat_after(after).ok();
+                    Json(next_ts)
+                },
+            ),
         );
     // Add index methods
     for index_name in graph.indices.names() {
