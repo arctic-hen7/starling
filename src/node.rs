@@ -42,10 +42,12 @@ pub struct Node {
     pub body: Option<String>,
 
     /// The unique identifiers of all the *direct* children of this node. Unlike child connections,
-    /// this will *not* traverse the entire tree.
+    /// this will *not* traverse the entire tree. Each child will also have its title reported for
+    /// easy reference (the full title paths will be these, appended onto the title array of this
+    /// their parent node).
     ///
     /// This will only be populated if the children are requested.
-    pub children: Vec<Uuid>,
+    pub children: Vec<(Uuid, String)>,
 
     // --- Connection information ---
     /// Any valid connections this node has directly to other nodes.
@@ -210,7 +212,16 @@ impl Graph {
         // Collect the direct children if requested
         let mut children = Vec::new();
         if options.children {
-            children.extend(raw_node.children().iter().map(|child| *child.properties.id));
+            children.extend(raw_node.children().iter().map(|child| {
+                (
+                    *child.properties.id,
+                    document
+                        .root
+                        .node(&child.properties.id)
+                        .unwrap()
+                        .title(options.conn_format),
+                )
+            }));
         }
 
         // Collect metadata if requested
