@@ -29,6 +29,8 @@ pub struct Node {
     pub tags: HashSet<String>,
     /// The tags on this node's parents. There will be no duplicates here.
     pub parent_tags: HashSet<String>,
+    /// The ID of the parent, if there is one (this will be `None` for top-level nodes).
+    pub parent_id: Option<Uuid>,
 
     // --- Metadata ---
     /// The metadata about the node, if requested.
@@ -181,10 +183,6 @@ impl NodeOptions {
 
 impl Graph {
     /// Gets the details of the node with the given ID, if it exists.
-    ///
-    /// If `backinherit` is `true`, child connections and backlinks will be explored and returned
-    /// with the node, otherwise they will be left empty. If it can be set to `false`, this will
-    /// improve performance.
     // NOTE: We do this on the graph so we can get all the nodes it's connected to. This involves a
     // considerable degree of read-locking, so deadlocks could occur in here.
     pub async fn get_node(&self, uuid: Uuid, options: NodeOptions) -> Option<Node> {
@@ -199,11 +197,14 @@ impl Graph {
         // `StarlingNode`
         let document = path_node.document()?;
         let connected_node = document.root.node(&uuid)?;
-        // Traverse down to get the raw `StarlingNode`, accumulating tags along the way
+        // Traverse down to get the raw `StarlingNode`, accumulating tags along the way and finding
+        // the parent ID
         let mut parent_tags = HashSet::new();
+        let mut parent_id = None;
         let mut curr_node = document.root.scrubbed_node();
         for idx in connected_node.position() {
             parent_tags.extend(curr_node.tags.iter().cloned());
+            parent_id = Some(*curr_node.properties.id);
             curr_node = &curr_node.children()[*idx];
         }
         // This is the `StarlingNode` with children and other properties
@@ -491,6 +492,7 @@ impl Graph {
             path: node_path.clone(),
             tags: raw_node.tags.iter().cloned().collect(),
             parent_tags,
+            parent_id,
 
             metadata,
             body: options
