@@ -33,6 +33,15 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
             ),
         )
         .route(
+            "/root-id/:path",
+            get(
+                |Path(path): Path<PathBuf>, State(graph): State<Arc<Graph>>| async move {
+                    let root_id = graph.root_id(&path).await;
+                    Json(root_id)
+                },
+            ),
+        )
+        .route(
             "/nodes",
             get(
                 |State(graph): State<Arc<Graph>>, Json(opts): Json<NodeOptions>| async move {

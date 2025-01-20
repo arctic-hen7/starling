@@ -267,6 +267,16 @@ impl Graph {
                 .ok_or_else(|| path_node.error.as_ref().unwrap().to_string()),
         )
     }
+    /// Gets the ID of the root node in the given path, if it exists and has a document defined.
+    /// This can be used to, given a path, start interfacing with its nodes.
+    pub async fn root_id(&self, path: &Path) -> Option<Uuid> {
+        let paths = self.paths.read().await;
+        let path_node = paths.get(path)?;
+        let path_node = path_node.read().await;
+        path_node
+            .document()
+            .map(|doc| *doc.root.scrubbed_node().properties.id)
+    }
     /// Creates a new graph, tracking all files in the given directory recursively. This will read
     /// every file that can be parsed and parse them all, returning both the graph itself and a
     /// series of writes that should be made to correct any initial errors.
