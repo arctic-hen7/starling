@@ -8,6 +8,7 @@ axum = "0.7.6"
 chrono = "^0.4.35"
 crossbeam-queue = "0.3.11"
 directories = "5.0.1"
+fmterr = "0.1.1"
 futures = "0.3.30"
 # This makes `notify` play well with `tokio`
 notify = { version = "6.1.1", default-features = false, features = [ "macos_fsevent" ] }

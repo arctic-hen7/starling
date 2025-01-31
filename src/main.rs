@@ -1,5 +1,6 @@
 use config::{Config, STARLING_CONFIG};
 use error::Error;
+use fmterr::fmterr;
 use fs_engine::FsEngine;
 use graph::{Graph, IndexCriteria};
 use logging::setup_logging;
@@ -30,7 +31,7 @@ async fn main() {
         Ok(()) => (),
         // Any errors we *return* aren't for logging, we'll crash entirely
         Err(e) => {
-            eprintln!("error: {}", e);
+            eprintln!("{}", fmterr(&e));
             std::process::exit(1);
         }
     }

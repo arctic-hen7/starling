@@ -138,7 +138,14 @@ impl FsEngine {
             if !dir.join(path).exists() {
                 continue;
             }
-            watcher.unwatch(&dir.join(path))?;
+            match watcher.unwatch(&dir.join(path)) {
+                Ok(_) => {}
+                Err(err) => match err.kind {
+                    // Sometimes we get here with single-file exclusions...
+                    notify::ErrorKind::WatchNotFound => {}
+                    _ => return Err(err),
+                },
+            };
         }
 
         Ok(async move {
