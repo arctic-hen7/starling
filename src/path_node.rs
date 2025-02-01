@@ -574,7 +574,7 @@ pub type StarlingNode = OrgishNode<StarlingKeyword, ForceUuidId>;
 
 /// A keyword parser for a vertex document that works off the keywords provided in a Starling
 /// configuration.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StarlingKeyword {
     pub keyword: String,
 }

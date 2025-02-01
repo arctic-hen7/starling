@@ -2,6 +2,7 @@ use crate::conflict_detector::{Conflict, Write, WriteSource};
 use crate::node::{Node, NodeOptions};
 use crate::path_node::StarlingNode;
 use crate::{debouncer::DebouncedEvents, patch::GraphPatch, path_node::PathNode};
+use fmterr::fmterr;
 use futures::future::join;
 use futures::future::join_all;
 use futures::future::OptionFuture;
@@ -248,24 +249,29 @@ impl Graph {
     /// Returns any errors associated with the given path. The return type here is a little
     /// strange: if the path couldn't be parsed, you'll get an `Err(PathParseError)` (stringified),
     /// but if it could be, you'll get an `Ok(_)` with a list of the IDs of all invalid connections
-    /// made in the path. If the path doesn't exist at all, you'll get `None`.
+    /// made in the path. If the path doesn't exist at all, you'll get `None`. Since any path parse
+    /// error will be erased once it no longer occurs in the latest version, even if there are
+    /// invalid connections present in an earlier, parseable version, if the latest version is not
+    /// parseable, that error will be returned preferentially.
     #[tracing::instrument(skip(self))]
     pub async fn errors(&self, path: &Path) -> Option<Result<Vec<Uuid>, String>> {
         let paths = self.paths.read().await;
         let path_node = paths.get(path)?.read().await;
-        Some(
-            path_node
+
+        Some(if let Some(err) = &path_node.error {
+            Err(fmterr(err))
+        } else {
+            // If there's no error, a document is guaranteed
+            Ok(path_node
                 .document()
-                .map(|doc| {
-                    doc.root
-                        .connections()
-                        .filter(|conn| !conn.is_valid())
-                        .map(|conn| conn.id())
-                        .collect()
-                })
-                // If there's no document, an error is guaranteed
-                .ok_or_else(|| path_node.error.as_ref().unwrap().to_string()),
-        )
+                .as_ref()
+                .unwrap()
+                .root
+                .connections()
+                .filter(|conn| !conn.is_valid())
+                .map(|conn| conn.id())
+                .collect())
+        })
     }
     /// Gets the ID of the root node in the given path, if it exists and has a document defined.
     /// This can be used to, given a path, start interfacing with its nodes.
