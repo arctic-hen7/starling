@@ -1,5 +1,5 @@
 use config::{Config, STARLING_CONFIG};
-use error::Error;
+use error::{DirError, Error};
 use fmterr::fmterr;
 use fs_engine::FsEngine;
 use graph::{Graph, IndexCriteria};
@@ -45,8 +45,11 @@ async fn core() -> Result<(), Error> {
         .ok_or(Error::NoDir)?;
     // Later functions will panic if this isn't upheld
     if !dir.is_dir() {
-        return Err(Error::InvalidDir { path: dir });
+        return Err(DirError::InvalidDir { path: dir }.into());
     }
+    let dir = dir
+        .canonicalize()
+        .map_err(|err| DirError::CanonicalizeFailed { path: dir, err })?;
 
     // Set up configuration and logging (we need config to know where to log)
     STARLING_CONFIG.set(Config::from_dir(&dir)?);
@@ -76,11 +79,11 @@ async fn core() -> Result<(), Error> {
 
     // Start up the filesystem processing engine and let it run forever
     let fs_engine = FsEngine::new(graph.clone(), initial_writes);
-    let fs_engine_task = fs_engine.run(dir)?;
+    let fs_engine_task = fs_engine.run(&dir)?;
     info!("about to start filesystem engine");
     tokio::spawn(fs_engine_task);
 
-    // Set up the server
+    // Start the server
     let config = STARLING_CONFIG.get();
     let listener = TcpListener::bind((config.host.as_str(), config.port))
         .await
@@ -90,7 +93,7 @@ async fn core() -> Result<(), Error> {
             err,
         })?;
     info!("about to start server");
-    axum::serve(listener, make_app(graph))
+    axum::serve(listener, make_app(graph, &dir)?)
         .await
         .map_err(|err| Error::ServeFailed { err })?;
 

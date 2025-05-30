@@ -11,7 +11,7 @@ use notify::{
     event::{CreateKind, ModifyKind},
     EventKind as NotifyEvent, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 use tokio::{select, sync::mpsc};
 use tracing::{debug, error, info, span, warn, Level};
 
@@ -59,12 +59,13 @@ impl FsEngine {
     /// accordingly. The future this returns will run forever, and should be spawned on its own
     /// task.
     ///
-    /// This takes the same directory as the graph started on.
+    /// This takes the same directory as the graph started on, which *must* be canonicalized.
     #[tracing::instrument(skip_all)]
-    pub fn run(mut self, dir: PathBuf) -> Result<impl Future<Output = ()> + Send, notify::Error> {
-        assert!(dir.is_dir());
-        // We'll need this to turn absolute event paths into relative paths
-        let cwd = dir.canonicalize().unwrap();
+    pub fn run(mut self, cwd: &Path) -> Result<impl Future<Output = ()> + Send, notify::Error> {
+        assert!(cwd.is_dir());
+        assert!(cwd.is_absolute());
+
+        let cwd = cwd.to_path_buf();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut watcher =
@@ -131,14 +132,14 @@ impl FsEngine {
             .unwrap();
         // If watching the directory fails, we'll error before the future so the user can handle
         // this immediately
-        watcher.watch(&dir, RecursiveMode::Recursive)?;
+        watcher.watch(&cwd, RecursiveMode::Recursive)?;
         // Now unwatch all the exclusion paths
         for path in &STARLING_CONFIG.get().exclude_paths {
             // It's fine for the exclusion path not to exist
-            if !dir.join(path).exists() {
+            if !cwd.join(path).exists() {
                 continue;
             }
-            match watcher.unwatch(&dir.join(path)) {
+            match watcher.unwatch(&cwd.join(path)) {
                 Ok(_) => {}
                 Err(err) => match err.kind {
                     // Sometimes we get here with single-file exclusions...
@@ -185,7 +186,7 @@ impl FsEngine {
 
                             let graph = self.graph.clone();
                             let writes_queue = self.writes_queue.clone();
-                            let dir = dir.clone();
+                            let dir = cwd.clone();
                             patch_task = Some(tokio::spawn(async move {
                                 let patch = GraphPatch::from_events(debounced_events_clone, &dir).await;
 
@@ -222,7 +223,7 @@ impl FsEngine {
                             for write in updated_writes {
                                 match write.conflict {
                                     Conflict::None => {
-                                        let full_path = dir.join(&write.path);
+                                        let full_path = cwd.join(&write.path);
                                         write_futs.push(
                                             tokio::fs::write(full_path.clone(), write.contents)
                                         );

@@ -1,4 +1,4 @@
-use crate::{config::STARLING_CONFIG, graph::Graph, node::NodeOptions};
+use crate::{config::STARLING_CONFIG, error::DirError, graph::Graph, node::NodeOptions};
 use axum::{
     extract::{Path, Query, State},
     response::IntoResponse,
@@ -8,7 +8,10 @@ use axum::{
 use chrono::NaiveDate;
 use orgish::Timestamp;
 use serde::Deserialize;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path as StdPath, PathBuf},
+    sync::Arc,
+};
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -19,8 +22,21 @@ struct QueryOptions {
     use_bincode: bool,
 }
 
-/// Creates the Axum app for serving over the network, using the given [`Graph`].
-pub fn make_app(graph: Arc<Graph>) -> Router {
+/// Creates the Axum app for serving over the network, using the given [`Graph`] and root path,
+/// which *must* have been canonicalized.
+pub fn make_app(graph: Arc<Graph>, dir: &StdPath) -> Result<Router, DirError> {
+    assert!(dir.is_dir() && dir.is_absolute());
+
+    // Get the full directory path as a string so the server can report it
+    // This should never fail, because we parsed this from a UTF-8 string in the first place, but
+    // canonicalisation might include non-UTF-8 characters, so we need to check
+    let dir_full_str = dir
+        .to_str()
+        .ok_or(DirError::NonUtf8 {
+            path: dir.to_path_buf(),
+        })?
+        .to_string();
+
     let mut router = Router::new()
         .route(
             "/node/:id",
@@ -72,6 +88,7 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
             ),
         )
         // --- Information about configuration ---
+        .route("/info/root", get(|| async move { Json(dir_full_str) }))
         .route(
             "/info/tags",
             get(|| async {
@@ -139,5 +156,5 @@ pub fn make_app(graph: Arc<Graph>) -> Router {
         );
     }
 
-    router.with_state(graph)
+    Ok(router.with_state(graph))
 }
